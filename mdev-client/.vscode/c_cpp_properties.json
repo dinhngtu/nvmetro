@@ -1,0 +1,53 @@
+{
+    "configurations": [
+        {
+            "name": "Linux",
+            "includePath": [
+                "${workspaceFolder}/include",
+                "/usr/include/libnl3",
+                "/home/tu/linux-mdev-nvme/usr/include",
+                "/opt/intel/oneapi/ippcp/latest/include"
+            ],
+            "defines": [],
+            "compilerPath": "/usr/bin/clang++-12",
+            "cStandard": "c11",
+            "cppStandard": "c++20",
+            "intelliSenseMode": "linux-clang-x64",
+            "compilerArgs": [
+                "-stdlib=libc++"
+            ],
+            "browse": {
+                "path": [
+                    "${workspaceFolder}/include",
+                    "/usr/include/libnl3",
+                    "/home/tu/linux-mdev-nvme/usr/include",
+                    "/opt/intel/oneapi/ippcp/latest/include",
+                    "${workspaceFolder}"
+                ],
+                "limitSymbolsToIncludedHeaders": true
+            }
+        },
+        {
+            "name": "Linux GCC",
+            "includePath": [
+                "${workspaceFolder}/include",
+                "/usr/include/libnl3",
+                "/home/tu/linux-mdev-nvme/usr/include",
+                "/opt/intel/oneapi/ippcp/latest/include"
+            ],
+            "defines": [],
+            "compilerPath": "/usr/bin/g++-10",
+            "intelliSenseMode": "linux-gcc-x64",
+            "compilerArgs": [],
+            "cStandard": "c11",
+            "cppStandard": "c++20",
+            "browse": {
+                "path": [
+                    "${workspaceFolder}/**"
+                ],
+                "limitSymbolsToIncludedHeaders": true
+            }
+        }
+    ],
+    "version": 4
+}

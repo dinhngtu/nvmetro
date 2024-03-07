@@ -1,0 +1,4 @@
+#kernbench-{{%w=host}}-{{%w=vmmode}}-{{%d=runno}}/{{%w=step}}
+{{%f=system}}
+{{%f=user}}
+{{%f=elapsed}}

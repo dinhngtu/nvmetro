@@ -1,0 +1,384 @@
+From e888239a67886d6b46ae0bfcbadb51d62094020d Mon Sep 17 00:00:00 2001
+From: Maxim Levitsky <mlevitsk@redhat.com>
+Date: Tue, 19 Mar 2019 12:56:42 +0200
+Subject: [PATCH 06/11] nvme/core: add mdev interfaces
+
+This adds infrastructure for a nvme-mdev
+to attach to the core driver, to be able to
+know which nvme controllers are present and which
+namespaces they have.
+
+It also adds an interface to nvme device drivers
+which expose the its queues in a controlled manner
+to the nvme mdev core driver. A driver must opt-in
+for this using a new flag NVME_F_MDEV_SUPPORTED
+
+If the mdev device driver also sets the
+NVME_F_MDEV_DMA_SUPPORTED, the mdev core will
+dma map all the guest memory into the nvme device,
+so that nvme device driver can use dma addresses as passed
+from the mdev core driver
+
+Signed-off-by: Maxim Levitsky <mlevitsk@redhat.com>
+---
+ drivers/nvme/host/core.c | 160 +++++++++++++++++++++++++++++++++++++--
+ drivers/nvme/host/nvme.h |  54 ++++++++++++-
+ 2 files changed, 204 insertions(+), 10 deletions(-)
+
+diff --git a/drivers/nvme/host/core.c b/drivers/nvme/host/core.c
+index 36c76979e0ef..2a1bcd3d1c8c 100644
+--- a/drivers/nvme/host/core.c
++++ b/drivers/nvme/host/core.c
+@@ -89,6 +89,8 @@ static dev_t nvme_chr_devt;
+ static struct class *nvme_class;
+ static struct class *nvme_subsys_class;
+ 
++static void nvme_ns_remove(struct nvme_ns *ns);
++static int nvme_revalidate_disk(struct gendisk *disk);
+ static void nvme_put_subsystem(struct nvme_subsystem *subsys);
+ static void nvme_remove_invalid_namespaces(struct nvme_ctrl *ctrl,
+ 					   unsigned nsid);
+@@ -103,6 +105,105 @@ static void nvme_update_bdev_size(struct gendisk *disk)
+ 	}
+ }
+ 
++#ifdef CONFIG_NVME_MDEV
++
++static struct nvme_mdev_driver *mdev_driver_interface;
++static DEFINE_MUTEX(mdev_ctrl_lock);
++static LIST_HEAD(mdev_ctrl_list);
++
++static bool nvme_ctrl_has_mdev(struct nvme_ctrl *ctrl)
++{
++	return  (ctrl->ops->flags & NVME_F_MDEV_SUPPORTED) != 0;
++}
++
++static void nvme_mdev_add_ctrl(struct nvme_ctrl *ctrl)
++{
++	if (nvme_ctrl_has_mdev(ctrl)) {
++		mutex_lock(&mdev_ctrl_lock);
++		list_add_tail(&ctrl->link, &mdev_ctrl_list);
++		mutex_unlock(&mdev_ctrl_lock);
++	}
++}
++
++static void nvme_mdev_remove_ctrl(struct nvme_ctrl *ctrl)
++{
++	if (nvme_ctrl_has_mdev(ctrl)) {
++		mutex_lock(&mdev_ctrl_lock);
++		list_del_init(&ctrl->link);
++		mutex_unlock(&mdev_ctrl_lock);
++	}
++}
++
++int nvme_core_register_mdev_driver(struct nvme_mdev_driver *driver_ops)
++{
++	struct nvme_ctrl *ctrl;
++
++	if (mdev_driver_interface)
++		return -EEXIST;
++
++	mdev_driver_interface = driver_ops;
++
++	mutex_lock(&mdev_ctrl_lock);
++	list_for_each_entry(ctrl, &mdev_ctrl_list, link)
++		mdev_driver_interface->nvme_ctrl_state_changed(ctrl);
++
++	mutex_unlock(&mdev_ctrl_lock);
++	return 0;
++}
++EXPORT_SYMBOL_GPL(nvme_core_register_mdev_driver);
++
++void nvme_core_unregister_mdev_driver(struct nvme_mdev_driver *driver_ops)
++{
++	if (WARN_ON(driver_ops != mdev_driver_interface))
++		return;
++	mdev_driver_interface = NULL;
++}
++EXPORT_SYMBOL_GPL(nvme_core_unregister_mdev_driver);
++
++static void nvme_mdev_ctrl_state_changed(struct nvme_ctrl *ctrl)
++{
++	if (!mdev_driver_interface || !nvme_ctrl_has_mdev(ctrl))
++		return;
++	if (!try_module_get(mdev_driver_interface->owner))
++		return;
++
++	mdev_driver_interface->nvme_ctrl_state_changed(ctrl);
++	module_put(mdev_driver_interface->owner);
++}
++
++static void nvme_mdev_ns_state_changed(struct nvme_ctrl *ctrl,
++				       struct nvme_ns *ns, bool removed)
++{
++	if (!mdev_driver_interface || !nvme_ctrl_has_mdev(ctrl))
++		return;
++	if (!try_module_get(mdev_driver_interface->owner))
++		return;
++
++	mdev_driver_interface->nvme_ns_state_changed(ctrl,
++			ns->head->ns_id, removed);
++	module_put(mdev_driver_interface->owner);
++}
++
++#else
++static void nvme_mdev_ctrl_state_changed(struct nvme_ctrl *ctrl)
++{
++}
++
++static void nvme_mdev_ns_state_changed(struct nvme_ctrl *ctrl,
++				       struct nvme_ns *ns, bool removed)
++{
++}
++
++static void nvme_mdev_add_ctrl(struct nvme_ctrl *ctrl)
++{
++}
++
++static void nvme_mdev_remove_ctrl(struct nvme_ctrl *ctrl)
++{
++}
++
++#endif
++
+ /*
+  * Prepare a queue for teardown.
+  *
+@@ -469,8 +570,12 @@ bool nvme_change_ctrl_state(struct nvme_ctrl *ctrl,
+ 	}
+ 
+ 	spin_unlock_irqrestore(&ctrl->lock, flags);
++
++	nvme_mdev_ctrl_state_changed(ctrl);
++
+ 	if (changed && ctrl->state == NVME_CTRL_LIVE)
+ 		nvme_kick_requeue_lists(ctrl);
++
+ 	return changed;
+ }
+ EXPORT_SYMBOL_GPL(nvme_change_ctrl_state);
+@@ -543,7 +648,7 @@ void nvme_put_ns(struct nvme_ns *ns)
+ {
+ 	kref_put(&ns->kref, nvme_free_ns);
+ }
+-EXPORT_SYMBOL_NS_GPL(nvme_put_ns, NVME_TARGET_PASSTHRU);
++EXPORT_SYMBOL_GPL(nvme_put_ns);
+ 
+ static inline void nvme_clear_nvme_request(struct request *req)
+ {
+@@ -1064,7 +1169,14 @@ static u32 nvme_passthru_start(struct nvme_ctrl *ctrl, struct nvme_ns *ns,
+ 
+ static void nvme_passthru_end(struct nvme_ctrl *ctrl, u32 effects)
+ {
+-	if (effects & NVME_CMD_EFFECTS_CSE_MASK) {
++	/*
++	 * Revalidate LBA changes prior to unfreezing. This is necessary to
++	 * prevent memory corruption if a logical block size was changed by
++	 * this command.
++	 */
++	if (effects & NVME_CMD_EFFECTS_LBCC)
++		nvme_update_formats(ctrl);
++	if (effects & (NVME_CMD_EFFECTS_LBCC | NVME_CMD_EFFECTS_CSE_MASK)) {
+ 		nvme_unfreeze(ctrl);
+ 		nvme_mpath_unfreeze(ctrl->subsys);
+ 		mutex_unlock(&ctrl->subsys->lock);
+@@ -1569,6 +1681,38 @@ static int nvme_submit_io(struct nvme_ns *ns, struct nvme_user_io __user *uio)
+ 			metadata, meta_len, lower_32_bits(io.slba), NULL, 0);
+ }
+ 
++static u32 nvme_known_admin_effects(u8 opcode)
++{
++	switch (opcode) {
++	case nvme_admin_format_nvm:
++		return NVME_CMD_EFFECTS_CSUPP | NVME_CMD_EFFECTS_LBCC |
++					NVME_CMD_EFFECTS_CSE_MASK;
++	case nvme_admin_sanitize_nvm:
++		return NVME_CMD_EFFECTS_CSE_MASK;
++	default:
++		break;
++	}
++	return 0;
++}
++
++static void nvme_update_ns(struct nvme_ctrl *ctrl, struct nvme_ns *ns)
++{
++	nvme_mdev_ns_state_changed(ctrl, ns, false);
++}
++
++static void nvme_update_formats(struct nvme_ctrl *ctrl)
++{
++	struct nvme_ns *ns;
++
++	down_read(&ctrl->namespaces_rwsem);
++	list_for_each_entry(ns, &ctrl->namespaces, list)
++		if (ns->disk && nvme_revalidate_disk(ns->disk))
++			nvme_set_queue_dying(ns);
++		else
++			nvme_update_ns(ctrl, ns);
++	up_read(&ctrl->namespaces_rwsem);
++}
++
+ static int nvme_user_cmd(struct nvme_ctrl *ctrl, struct nvme_ns *ns,
+ 			struct nvme_passthru_cmd __user *ucmd)
+ {
+@@ -3163,7 +3307,7 @@ int nvme_init_identify(struct nvme_ctrl *ctrl)
+ 	ret = nvme_configure_apst(ctrl);
+ 	if (ret < 0)
+ 		return ret;
+-	
++
+ 	ret = nvme_configure_timestamp(ctrl);
+ 	if (ret < 0)
+ 		return ret;
+@@ -3823,7 +3967,7 @@ static int ns_cmp(void *priv, struct list_head *a, struct list_head *b)
+ 	return nsa->head->ns_id - nsb->head->ns_id;
+ }
+ 
+-struct nvme_ns *nvme_find_get_ns(struct nvme_ctrl *ctrl, unsigned nsid)
++struct nvme_ns *nvme_find_get_ns(struct nvme_ctrl *ctrl, unsigned int nsid)
+ {
+ 	struct nvme_ns *ns, *ret = NULL;
+ 
+@@ -3841,7 +3985,7 @@ struct nvme_ns *nvme_find_get_ns(struct nvme_ctrl *ctrl, unsigned nsid)
+ 	up_read(&ctrl->namespaces_rwsem);
+ 	return ret;
+ }
+-EXPORT_SYMBOL_NS_GPL(nvme_find_get_ns, NVME_TARGET_PASSTHRU);
++EXPORT_SYMBOL_GPL(nvme_find_get_ns);
+ 
+ static void nvme_alloc_ns(struct nvme_ctrl *ctrl, unsigned nsid,
+ 		struct nvme_ns_ids *ids)
+@@ -3951,7 +4095,9 @@ static void nvme_ns_remove(struct nvme_ns *ns)
+ 	nvme_mpath_clear_current_path(ns);
+ 	synchronize_srcu(&ns->head->srcu); /* wait for concurrent submissions */
+ 
+-	if (ns->disk->flags & GENHD_FL_UP) {
++	nvme_mdev_ns_state_changed(ns->ctrl, ns, true);
++
++	if (ns->disk && ns->disk->flags & GENHD_FL_UP) {
+ 		del_gendisk(ns->disk);
+ 		blk_cleanup_queue(ns->queue);
+ 		if (blk_get_integrity(ns->disk))
+@@ -4458,6 +4604,7 @@ static void nvme_free_ctrl(struct device *dev)
+ 		mutex_unlock(&nvme_subsystems_lock);
+ 	}
+ 
++	nvme_mdev_remove_ctrl(ctrl);
+ 	ctrl->ops->free_ctrl(ctrl);
+ 
+ 	if (subsys)
+@@ -4536,6 +4683,7 @@ int nvme_init_ctrl(struct nvme_ctrl *ctrl, struct device *dev,
+ 
+ 	nvme_fault_inject_init(&ctrl->fault_inject, dev_name(ctrl->device));
+ 	nvme_mpath_init_ctrl(ctrl);
++	nvme_mdev_add_ctrl(ctrl);
+ 
+ 	return 0;
+ out_free_name:
+diff --git a/drivers/nvme/host/nvme.h b/drivers/nvme/host/nvme.h
+index 2a6ba291d802..39b2edfb85a7 100644
+--- a/drivers/nvme/host/nvme.h
++++ b/drivers/nvme/host/nvme.h
+@@ -228,6 +228,7 @@ struct nvme_fault_inject {
+ };
+ 
+ struct nvme_ctrl {
++	struct list_head link;
+ 	bool comp_seen;
+ 	enum nvme_ctrl_state state;
+ 	bool identified;
+@@ -345,6 +346,23 @@ enum nvme_iopolicy {
+ 	NVME_IOPOLICY_RR,
+ };
+ 
++#ifdef CONFIG_NVME_MDEV
++/* Interface to the host driver  */
++struct nvme_mdev_driver {
++	struct module *owner;
++
++	/* a controller state has changed*/
++	void (*nvme_ctrl_state_changed)(struct nvme_ctrl *ctrl);
++
++	/* NS is updated in some way (after format or so) */
++	void (*nvme_ns_state_changed)(struct nvme_ctrl *ctrl,
++				      u32 nsid, bool removed);
++};
++
++int nvme_core_register_mdev_driver(struct nvme_mdev_driver *driver_ops);
++void nvme_core_unregister_mdev_driver(struct nvme_mdev_driver *driver_ops);
++#endif
++
+ struct nvme_subsystem {
+ 	int			instance;
+ 	struct device		dev;
+@@ -371,7 +389,7 @@ struct nvme_subsystem {
+ };
+ 
+ /*
+- * Container structure for uniqueue namespace identifiers.
++ * Container structure for unique namespace identifiers.
+  */
+ struct nvme_ns_ids {
+ 	u8	eui64[8];
+@@ -454,13 +472,22 @@ static inline bool nvme_ns_has_pi(struct nvme_ns *ns)
+ 	return ns->pi_type && ns->ms == sizeof(struct t10_pi_tuple);
+ }
+ 
++struct nvme_ext_data_iter;
++struct nvme_ext_cmd_result {
++	u32 tag;
++	u16 status;
++};
++
+ struct nvme_ctrl_ops {
+ 	const char *name;
+ 	struct module *module;
+ 	unsigned int flags;
+-#define NVME_F_FABRICS			(1 << 0)
+-#define NVME_F_METADATA_SUPPORTED	(1 << 1)
+-#define NVME_F_PCI_P2PDMA		(1 << 2)
++#define NVME_F_FABRICS			BIT(0)
++#define NVME_F_METADATA_SUPPORTED	BIT(1)
++#define NVME_F_PCI_P2PDMA		BIT(2)
++#define NVME_F_MDEV_SUPPORTED		BIT(3)
++#define NVME_F_MDEV_DMA_SUPPORTED	BIT(4)
++
+ 	int (*reg_read32)(struct nvme_ctrl *ctrl, u32 off, u32 *val);
+ 	int (*reg_write32)(struct nvme_ctrl *ctrl, u32 off, u32 val);
+ 	int (*reg_read64)(struct nvme_ctrl *ctrl, u32 off, u64 *val);
+@@ -468,6 +495,23 @@ struct nvme_ctrl_ops {
+ 	void (*submit_async_event)(struct nvme_ctrl *ctrl);
+ 	void (*delete_ctrl)(struct nvme_ctrl *ctrl);
+ 	int (*get_address)(struct nvme_ctrl *ctrl, char *buf, int size);
++
++#ifdef CONFIG_NVME_MDEV
++	int (*ext_queues_available)(struct nvme_ctrl *ctrl);
++	int (*ext_queue_alloc)(struct nvme_ctrl *ctrl, u16 *qid);
++	void (*ext_queue_free)(struct nvme_ctrl *ctrl, u16 qid);
++
++	int (*ext_queue_submit)(struct nvme_ctrl *ctrl,
++				u16 qid, u32 tag,
++				struct nvme_command *command,
++				struct nvme_ext_data_iter *iter);
++
++	bool (*ext_queue_full)(struct nvme_ctrl *ctrl, u16 qid);
++
++	int (*ext_queue_poll)(struct nvme_ctrl *ctrl, u16 qid,
++			      struct nvme_ext_cmd_result *results,
++			      unsigned int max_len);
++#endif
+ };
+ 
+ #ifdef CONFIG_FAULT_INJECTION_DEBUG_FS
+@@ -587,6 +631,8 @@ void nvme_start_ctrl(struct nvme_ctrl *ctrl);
+ void nvme_stop_ctrl(struct nvme_ctrl *ctrl);
+ int nvme_init_identify(struct nvme_ctrl *ctrl);
+ 
++struct nvme_ns *nvme_find_get_ns(struct nvme_ctrl *ctrl, unsigned int nsid);
++void nvme_put_ns(struct nvme_ns *ns);
+ void nvme_remove_namespaces(struct nvme_ctrl *ctrl);
+ 
+ int nvme_sec_submit(void *data, u16 spsp, u8 secp, void *buffer, size_t len,
+-- 
+2.25.1
+

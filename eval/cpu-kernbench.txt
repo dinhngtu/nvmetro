@@ -1,0 +1,2 @@
+#kernbench-{{%w=host}}-{{%w=vmmode}}-{{%d=runno}}/cpu-{{%w=step}}-{{%w=cpustep}}
+cpu{{%S}}{{%d=user}}{{%S}}{{%d=nice}}{{%S}}{{%d=system}}{{%S}}{{%d=idle}}{{%S}}{{%d=iowait}}{{%S}}{{%d=irq}}{{%S}}{{%d=softirq}}{{%S}}{{%d=steal}}{{%S}}{{%d=guest}}{{%S}}{{%d=guest_nice}}

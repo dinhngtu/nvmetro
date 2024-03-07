@@ -1,0 +1,17 @@
+mdev-client-fd
+encryptor
+encryptor-mt
+replicator
+replicator-aio
+libmdevclient.a
+*.o
+*.d
+.vscode/*.log
+.cache/
+compile_commands.json
+*.o.json
+/*.json
+encryptor-sgx
+encryptor-aio
+encryptor-sgx-aio
+encryptor-multi

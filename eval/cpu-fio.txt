@@ -1,0 +1,2 @@
+#{{/fio\w*/=fiotype}}-{{%w=host}}-{{%w=vmmode}}-{{%d=runno}}/cpu-bs{{%d=bs}}-t{{%w=runtype}}-iod{{%d=iodepth}}-j{{%d=numjobs}}-{{%w=cpustep}}
+cpu{{%S}}{{%d=user}}{{%S}}{{%d=nice}}{{%S}}{{%d=system}}{{%S}}{{%d=idle}}{{%S}}{{%d=iowait}}{{%S}}{{%d=irq}}{{%S}}{{%d=softirq}}{{%S}}{{%d=steal}}{{%S}}{{%d=guest}}{{%S}}{{%d=guest_nice}}

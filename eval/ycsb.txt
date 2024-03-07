@@ -1,0 +1,3 @@
+#ycsb-{{%w=host}}-{{%w=vmmode}}-j{{%d=nrjobs}}-{{%d=runno}}/{{%w=workload}}-{{%w=step}}-{{%d=jobno}}
+[OVERALL], RunTime(ms), {{%d=runtime}}
+[OVERALL], Throughput(ops/sec), {{%f=tput}}

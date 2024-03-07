@@ -1,0 +1,4 @@
+.config_*
+*.o
+*.so
+.vscode/*.log

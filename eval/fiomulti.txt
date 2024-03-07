@@ -1,0 +1,1 @@
+#fio-{{%w=host}}-{{%w=vmmode}}-{{%d=runno}}/bs{{%d=bs}}-t{{%w=runtype}}-iod{{%d=iodepth}}-j{{%d=numjobs}}_{{%*=uuid}}

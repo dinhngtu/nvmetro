@@ -1,0 +1,70 @@
+From a9102d1ff9989aeaeb39c7ae926ae9931aa848ae Mon Sep 17 00:00:00 2001
+From: Maxim Levitsky <mlevitsk@redhat.com>
+Date: Fri, 8 Mar 2019 21:35:46 +0200
+Subject: [PATCH 04/11] nvme/core: add NVME_CTRL_SUSPENDED controller state
+
+This state will be used by a controller that is going to
+suspended state, and will later be used by mdev
+framework to detect this and flush its queues
+
+Signed-off-by: Maxim Levitsky <mlevitsk@redhat.com>
+---
+ drivers/nvme/host/core.c | 15 +++++++++++++++
+ drivers/nvme/host/nvme.h |  1 +
+ 2 files changed, 16 insertions(+)
+
+diff --git a/drivers/nvme/host/core.c b/drivers/nvme/host/core.c
+index ff5a16b17133..36c76979e0ef 100644
+--- a/drivers/nvme/host/core.c
++++ b/drivers/nvme/host/core.c
+@@ -387,6 +387,19 @@ bool nvme_change_ctrl_state(struct nvme_ctrl *ctrl,
+ 		switch (old_state) {
+ 		case NVME_CTRL_NEW:
+ 		case NVME_CTRL_RESETTING:
++		case NVME_CTRL_CONNECTING:
++		case NVME_CTRL_SUSPENDED:
++			changed = true;
++			/* FALLTHRU */
++		default:
++			break;
++		}
++		break;
++	case NVME_CTRL_SUSPENDED:
++		switch (old_state) {
++		case NVME_CTRL_NEW:
++		case NVME_CTRL_LIVE:
++		case NVME_CTRL_RESETTING:
+ 		case NVME_CTRL_CONNECTING:
+ 			changed = true;
+ 			fallthrough;
+@@ -398,6 +411,7 @@ bool nvme_change_ctrl_state(struct nvme_ctrl *ctrl,
+ 		switch (old_state) {
+ 		case NVME_CTRL_NEW:
+ 		case NVME_CTRL_LIVE:
++		case NVME_CTRL_SUSPENDED:
+ 			changed = true;
+ 			fallthrough;
+ 		default:
+@@ -419,6 +433,7 @@ bool nvme_change_ctrl_state(struct nvme_ctrl *ctrl,
+ 		case NVME_CTRL_LIVE:
+ 		case NVME_CTRL_RESETTING:
+ 		case NVME_CTRL_CONNECTING:
++		case NVME_CTRL_SUSPENDED:
+ 			changed = true;
+ 			fallthrough;
+ 		default:
+diff --git a/drivers/nvme/host/nvme.h b/drivers/nvme/host/nvme.h
+index 3cb3c82061d7..2a6ba291d802 100644
+--- a/drivers/nvme/host/nvme.h
++++ b/drivers/nvme/host/nvme.h
+@@ -210,6 +210,7 @@ static inline u16 nvme_req_qid(struct request *req)
+ enum nvme_ctrl_state {
+ 	NVME_CTRL_NEW,
+ 	NVME_CTRL_LIVE,
++	NVME_CTRL_SUSPENDED,
+ 	NVME_CTRL_RESETTING,
+ 	NVME_CTRL_CONNECTING,
+ 	NVME_CTRL_DELETING,
+-- 
+2.25.1
+

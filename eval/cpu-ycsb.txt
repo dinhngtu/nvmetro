@@ -1,0 +1,2 @@
+#ycsb-{{%w=host}}-{{%w=vmmode}}-j{{%d=nrjobs}}-{{%d=runno}}/cpu-{{%w=workload}}-{{%w=step}}-{{%w=cpustep}}
+cpu{{%S}}{{%d=user}}{{%S}}{{%d=nice}}{{%S}}{{%d=system}}{{%S}}{{%d=idle}}{{%S}}{{%d=iowait}}{{%S}}{{%d=irq}}{{%S}}{{%d=softirq}}{{%S}}{{%d=steal}}{{%S}}{{%d=guest}}{{%S}}{{%d=guest_nice}}

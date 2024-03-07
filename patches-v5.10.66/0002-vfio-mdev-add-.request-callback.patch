@@ -1,0 +1,67 @@
+From bb178b49191dfc23552d9e5597e37d52208a5ee7 Mon Sep 17 00:00:00 2001
+From: Maxim Levitsky <mlevitsk@redhat.com>
+Date: Mon, 4 Feb 2019 23:45:28 +0200
+Subject: [PATCH 02/11] vfio/mdev: add .request callback
+
+This will allow the hotplug to be enabled for mediated devices
+
+Signed-off-by: Maxim Levitsky <mlevitsk@redhat.com>
+---
+ drivers/vfio/mdev/vfio_mdev.c | 11 +++++++++++
+ include/linux/mdev.h          |  4 ++++
+ 2 files changed, 15 insertions(+)
+
+diff --git a/drivers/vfio/mdev/vfio_mdev.c b/drivers/vfio/mdev/vfio_mdev.c
+index 30964a4e0a28..2dd243f73945 100644
+--- a/drivers/vfio/mdev/vfio_mdev.c
++++ b/drivers/vfio/mdev/vfio_mdev.c
+@@ -98,6 +98,16 @@ static int vfio_mdev_mmap(void *device_data, struct vm_area_struct *vma)
+ 	return parent->ops->mmap(mdev, vma);
+ }
+ 
++static void vfio_mdev_request(void *device_data, unsigned int count)
++{
++	struct mdev_device *mdev = device_data;
++	struct mdev_parent *parent = mdev->parent;
++
++	if (unlikely(!parent->ops->request))
++		return;
++	parent->ops->request(mdev, count);
++}
++
+ static const struct vfio_device_ops vfio_mdev_dev_ops = {
+ 	.name		= "vfio-mdev",
+ 	.open		= vfio_mdev_open,
+@@ -106,6 +116,7 @@ static const struct vfio_device_ops vfio_mdev_dev_ops = {
+ 	.read		= vfio_mdev_read,
+ 	.write		= vfio_mdev_write,
+ 	.mmap		= vfio_mdev_mmap,
++	.request	= vfio_mdev_request,
+ };
+ 
+ static int vfio_mdev_probe(struct device *dev)
+diff --git a/include/linux/mdev.h b/include/linux/mdev.h
+index 0ce30ca78db0..f657a07ca68b 100644
+--- a/include/linux/mdev.h
++++ b/include/linux/mdev.h
+@@ -10,6 +10,9 @@
+ #ifndef MDEV_H
+ #define MDEV_H
+ 
++#include <linux/uuid.h>
++#include <linux/device.h>
++
+ struct mdev_device;
+ 
+ /*
+@@ -92,6 +95,7 @@ struct mdev_parent_ops {
+ 	long	(*ioctl)(struct mdev_device *mdev, unsigned int cmd,
+ 			 unsigned long arg);
+ 	int	(*mmap)(struct mdev_device *mdev, struct vm_area_struct *vma);
++	void	(*request)(struct mdev_device *mdev, unsigned int count);
+ };
+ 
+ /* interface for exporting mdev supported type attributes */
+-- 
+2.25.1
+

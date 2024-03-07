@@ -1,0 +1,32 @@
+enclave {
+    from "sgx_tstdc.edl" import *;
+    from "sgx_tswitchless.edl" import *;
+
+    struct nvme_command_alias {
+        char buf[64];
+    };
+
+    trusted {
+        public int put_key([in] unsigned char key[32], int lba_shift);
+
+        public long crypt_buffer_inplace(
+            size_t slba,
+            [user_check] unsigned char *buf,
+            size_t nr_blocks,
+            int decrypt) transition_using_threads;
+
+        public long crypt_command_inplace(
+            [user_check] unsigned char *pvm,
+            size_t pvm_size,
+            [in] const struct nvme_command_alias *cmd,
+            int decrypt) transition_using_threads;
+
+        public long crypt_command(
+            [user_check] unsigned char *pvm,
+            size_t pvm_size,
+            [in] const struct nvme_command_alias *cmd,
+            [user_check] unsigned char *outbuf,
+            size_t outbuf_size,
+            int decrypt) transition_using_threads;
+    };
+};

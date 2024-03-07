@@ -1,0 +1,30 @@
+{
+    "configurations": [
+        {
+            "name": "Linux",
+            "includePath": [
+                "${workspaceFolder}/Enclave",
+                "${workspaceFolder}/Enclave/include",
+                "${workspaceFolder}/../mdev-client/include",
+                "/opt/intel/sgxsdk/include",
+                "/opt/intel/sgxsdk/include/ipp",
+                "/opt/intel/sgxsdk/include/libcxx",
+                "/opt/intel/sgxsdk/include/tlibc",
+                "/lib/modules/5.10.66+/build/usr/include"
+            ],
+            "defines": [
+                "TCB_SPAN_NAMESPACE_NAME=std",
+                "TCB_SPAN_THROW_ON_CONTRACT_VIOLATION"
+            ],
+            "compilerPath": "/usr/bin/g++",
+            "intelliSenseMode": "linux-gcc-x64",
+            "cppStandard": "c++14",
+            "cStandard": "c99",
+            "compilerArgs": [
+                "-nostdinc",
+                "-nostdinc++"
+            ]
+        }
+    ],
+    "version": 4
+}

@@ -1,0 +1,225 @@
+From 23e6e799a937c5808e40cb1bce19d39f435a63f5 Mon Sep 17 00:00:00 2001
+From: Maxim Levitsky <mlevitsk@redhat.com>
+Date: Mon, 25 Feb 2019 08:17:17 +0200
+Subject: [PATCH 01/11] vfio/mdev: add notifier for map events
+
+Allow an VFIO mdev device to listen to map events
+This will allow a mdev driver to dma map memory
+as soon as it gets added to the domain
+
+--
+Signed-off-by: Maxim Levitsky <mlevitsk@redhat.com>
+---
+ drivers/vfio/vfio_iommu_type1.c | 110 +++++++++++++++++++++++++++++---
+ include/linux/vfio.h            |   4 ++
+ 2 files changed, 104 insertions(+), 10 deletions(-)
+
+diff --git a/drivers/vfio/vfio_iommu_type1.c b/drivers/vfio/vfio_iommu_type1.c
+index fbd438e9b9b0..b821ac00c51c 100644
+--- a/drivers/vfio/vfio_iommu_type1.c
++++ b/drivers/vfio/vfio_iommu_type1.c
+@@ -62,13 +62,15 @@ module_param_named(dma_entry_limit, dma_entry_limit, uint, 0644);
+ MODULE_PARM_DESC(dma_entry_limit,
+ 		 "Maximum number of user DMA mappings per container (65535).");
+ 
++/* a container, usually one per VM*/
+ struct vfio_iommu {
+ 	struct list_head	domain_list;
+ 	struct list_head	iova_list;
+ 	struct vfio_domain	*external_domain; /* domain for external user */
+ 	struct mutex		lock;
+ 	struct rb_root		dma_list;
+-	struct blocking_notifier_head notifier;
++	struct blocking_notifier_head map_notifiers;
++	struct blocking_notifier_head unmap_notifiers;
+ 	unsigned int		dma_avail;
+ 	uint64_t		pgsize_bitmap;
+ 	bool			v2;
+@@ -77,6 +79,9 @@ struct vfio_iommu {
+ 	bool			pinned_page_dirty_scope;
+ };
+ 
++/* An IOMMU domain - also usually one per VM, unless devices assigned to VM
++ * are connected via different IOMMUs
++ */
+ struct vfio_domain {
+ 	struct iommu_domain	*domain;
+ 	struct list_head	next;
+@@ -674,7 +679,7 @@ static int vfio_iommu_type1_pin_pages(void *iommu_data,
+ 	mutex_lock(&iommu->lock);
+ 
+ 	/* Fail if notifier list is empty */
+-	if (!iommu->notifier.head) {
++	if (!iommu->unmap_notifiers.head) {
+ 		ret = -EINVAL;
+ 		goto pin_done;
+ 	}
+@@ -1205,7 +1210,7 @@ static int vfio_dma_do_unmap(struct vfio_iommu *iommu,
+ 			 * invalidation.
+ 			 */
+ 			mutex_unlock(&iommu->lock);
+-			blocking_notifier_call_chain(&iommu->notifier,
++			blocking_notifier_call_chain(&iommu->unmap_notifiers,
+ 						    VFIO_IOMMU_NOTIFY_DMA_UNMAP,
+ 						    &nb_unmap);
+ 			mutex_lock(&iommu->lock);
+@@ -1428,6 +1433,21 @@ static int vfio_dma_do_map(struct vfio_iommu *iommu,
+ 		if (ret)
+ 			vfio_remove_dma(iommu, dma);
+ 	}
++	mutex_unlock(&iommu->lock);
++
++	/*
++	 * Notify anyone (mdev vendor drivers) that new mapping has being
++	 * created - vendor drivers can in response pin/dma map the memory
++	 */
++	ret = blocking_notifier_call_chain(&iommu->map_notifiers,
++				    VFIO_IOMMU_NOTIFY_DMA_MAP,
++				    map);
++
++	ret = notifier_to_errno(ret);
++	if (ret)
++		vfio_remove_dma(iommu, dma);
++
++	return ret;
+ 
+ out_unlock:
+ 	mutex_unlock(&iommu->lock);
+@@ -2262,6 +2282,24 @@ static void vfio_iommu_unmap_unpin_reaccount(struct vfio_iommu *iommu)
+ 	}
+ }
+ 
++static void vfio_sanity_check_pfn_list(struct vfio_iommu *iommu)
++{
++	struct rb_node *n;
++
++	n = rb_first(&iommu->dma_list);
++	for (; n; n = rb_next(n)) {
++		struct vfio_dma *dma;
++
++		dma = rb_entry(n, struct vfio_dma, node);
++
++		if (WARN_ON(!RB_EMPTY_ROOT(&dma->pfn_list)))
++			break;
++	}
++	/* mdev vendor driver must unregister notifier */
++	WARN_ON(iommu->map_notifiers.head);
++	WARN_ON(iommu->unmap_notifiers.head);
++}
++
+ /*
+  * Called when a domain is removed in detach. It is possible that
+  * the removed domain decided the iova aperture window. Modify the
+@@ -2459,7 +2497,8 @@ static void *vfio_iommu_type1_open(unsigned long arg)
+ 	iommu->dma_list = RB_ROOT;
+ 	iommu->dma_avail = dma_entry_limit;
+ 	mutex_init(&iommu->lock);
+-	BLOCKING_INIT_NOTIFIER_HEAD(&iommu->notifier);
++	BLOCKING_INIT_NOTIFIER_HEAD(&iommu->unmap_notifiers);
++	BLOCKING_INIT_NOTIFIER_HEAD(&iommu->map_notifiers);
+ 
+ 	return iommu;
+ }
+@@ -2888,23 +2927,74 @@ static int vfio_iommu_type1_register_notifier(void *iommu_data,
+ 					      struct notifier_block *nb)
+ {
+ 	struct vfio_iommu *iommu = iommu_data;
++	struct rb_node *node;
++	int ret = 0;
++
++	if (*events == VFIO_IOMMU_NOTIFY_DMA_MAP) {
++
++		/* now register the notifier */
++		ret = blocking_notifier_chain_register(&iommu->map_notifiers,
++				nb);
++
++		/* replay the mapping */
++		 node = rb_first(&iommu->dma_list);
++		while (node) {
++			struct vfio_dma *dma = rb_entry(node, struct vfio_dma,
++					node);
++
++			struct vfio_iommu_type1_dma_map map;
++
++			map.argsz = sizeof(struct vfio_iommu_type1_dma_map);
++			map.flags = 0;
++
++			if (dma->prot & IOMMU_READ)
++				map.flags |= VFIO_DMA_MAP_FLAG_READ;
++			if (dma->prot & IOMMU_WRITE)
++				map.flags |= VFIO_DMA_MAP_FLAG_WRITE;
++
++			map.iova = dma->iova;
++			map.vaddr = dma->vaddr;
++			map.size = dma->size;
++
++			node = rb_next(node);
+ 
+-	/* clear known events */
+-	*events &= ~VFIO_IOMMU_NOTIFY_DMA_UNMAP;
++			/* Call only the first notifier, the one that
++			 * we just registered
++			 */
++			ret = __blocking_notifier_call_chain(
++					&iommu->map_notifiers,
++					VFIO_IOMMU_NOTIFY_DMA_MAP,
++					&map, 1, NULL);
++
++			ret = notifier_to_errno(ret);
++			if (ret) {
++				blocking_notifier_chain_unregister(
++						&iommu->map_notifiers, nb);
++				return ret;
++			}
++		}
+ 
+-	/* refuse to register if still events remaining */
+-	if (*events)
++	} else if (*events == VFIO_IOMMU_NOTIFY_DMA_UNMAP) {
++		ret =  blocking_notifier_chain_register(
++				&iommu->unmap_notifiers, nb);
++	} else {
+ 		return -EINVAL;
++	}
++	return ret;
+ 
+-	return blocking_notifier_chain_register(&iommu->notifier, nb);
+ }
+ 
+ static int vfio_iommu_type1_unregister_notifier(void *iommu_data,
+ 						struct notifier_block *nb)
+ {
+ 	struct vfio_iommu *iommu = iommu_data;
++	int ret;
+ 
+-	return blocking_notifier_chain_unregister(&iommu->notifier, nb);
++	ret = blocking_notifier_chain_unregister(&iommu->map_notifiers, nb);
++	if (ret)
++		ret = blocking_notifier_chain_unregister(
++				&iommu->unmap_notifiers, nb);
++	return ret;
+ }
+ 
+ static int vfio_iommu_type1_dma_rw_chunk(struct vfio_iommu *iommu,
+diff --git a/include/linux/vfio.h b/include/linux/vfio.h
+index 38d3c6a8dc7e..7c22d5d9aba1 100644
+--- a/include/linux/vfio.h
++++ b/include/linux/vfio.h
+@@ -134,10 +134,14 @@ enum vfio_notify_type {
+ 
+ /* events for VFIO_IOMMU_NOTIFY */
+ #define VFIO_IOMMU_NOTIFY_DMA_UNMAP	BIT(0)
++#define VFIO_IOMMU_NOTIFY_DMA_MAP	BIT(1)
+ 
+ /* events for VFIO_GROUP_NOTIFY */
+ #define VFIO_GROUP_NOTIFY_SET_KVM	BIT(0)
+ 
++/* Note: currently you can only register a notifier for a single event
++ * at the time
++ */
+ extern int vfio_register_notifier(struct device *dev,
+ 				  enum vfio_notify_type type,
+ 				  unsigned long *required_events,
+-- 
+2.25.1
+
