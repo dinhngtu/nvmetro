@@ -12,6 +12,9 @@ param(
 
 Set-StrictMode -Version Latest
 
+#$attempts = @("1", "2", "3")
+$attempts = @("1")
+
 $fioscens = @(
     "lat-bs512-trandread-iod1-j1",
     "lat-bs512-trandread-iod128-j1",
@@ -88,7 +91,7 @@ if (-not $NoCpuFreq) {
 }
 
 if (-not $NoFio) {
-    foreach ($i in @('1', '2', '3')) {
+    foreach ($i in $attempts) {
         foreach ($scen in $fioscens) {
             Format-Device -TargetHost $TargetHost -TargetDevice $TargetDevice -FormatMode $FormatMode
             ./bench-fio.ps1 -TargetHost $TargetHost -BenchName $BenchPrefix-$i -Scenario $scen -TargetDevice $TargetDevice

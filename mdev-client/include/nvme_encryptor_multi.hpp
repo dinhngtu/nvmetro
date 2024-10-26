@@ -4,7 +4,6 @@
 #include <utility>
 #include <sys/uio.h>
 
-#include "aligned_allocator.hpp"
 #include "nvme.hpp"
 #include "crypto/tbc.hpp"
 #include "util/uring.hpp"
@@ -51,5 +50,4 @@ private:
     void submit_flush_async(size_t sq, const nvme_command &cmd, uint32_t tag);
     std::shared_ptr<tweakable_block_cipher> _engine;
     std::shared_ptr<uring> _ring;
-    aligned_allocator<unsigned char, NVME_PAGE_SIZE> allocator{};
 };

@@ -31,6 +31,6 @@ private:
     int _bfd;
     std::shared_ptr<mapping> _vm;
     prp_en _e;
-    std::vector<unsigned char, aligned_allocator<unsigned char, NVME_PAGE_SIZE>> _zerobuf;
-    std::vector<unsigned char, aligned_allocator<unsigned char, NVME_PAGE_SIZE>> _encbuf;
+    std::vector<unsigned char, aligned_allocator<unsigned char, 64>> _zerobuf;
+    std::vector<unsigned char, aligned_allocator<unsigned char, 64>> _encbuf;
 };

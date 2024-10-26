@@ -37,7 +37,7 @@ private:
 
 class ippcp_category final : public std::error_category {
 public:
-    constexpr explicit ippcp_category() noexcept {
+    explicit ippcp_category() noexcept {
     }
     ippcp_category(const ippcp_category &) = delete;
     ippcp_category &operator=(const ippcp_category &) = delete;

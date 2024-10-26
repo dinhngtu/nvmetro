@@ -6,10 +6,21 @@
   - [Extracting and building the tools](#extracting-and-building-the-tools)
   - [Environment configuration](#environment-configuration)
   - [Setting up the remote NVMe target (for disk replication evals)](#setting-up-the-remote-nvme-target-for-disk-replication-evals)
+    - [Setting up the NVMeoF target](#setting-up-the-nvmeof-target)
+    - [Setting up the NVMeoF client](#setting-up-the-nvmeof-client)
 - [Running the evaluations](#running-the-evaluations)
   - [Starting the VM-under-test (VMUT)](#starting-the-vm-under-test-vmut)
   - [Running the evaluation](#running-the-evaluation)
-  - [Gathering and presenting results](#gathering-and-presenting-results)
+- [Running the evaluations (COW)](#running-the-evaluations-cow)
+  - [QEMU (`qcow`)](#qemu-qcow)
+  - [LVM (`lcow`)](#lvm-lcow)
+  - [SPDK (`spdkcow`)](#spdk-spdkcow)
+  - [XCOW (`xcow`)](#xcow-xcow)
+- [Gathering and presenting results](#gathering-and-presenting-results)
+    - [Fio performance: `fio.csv`](#fio-performance-fiocsv)
+    - [YCSB performance: `ycsb.csv`](#ycsb-performance-ycsbcsv)
+    - [Kernbench performance: `kernbench.csv`](#kernbench-performance-kernbenchcsv)
+    - [CPU usage: `cpu-*.csv`](#cpu-usage-cpu-csv)
 - [Appendix](#appendix)
   - [Building the NVMetro kernel](#building-the-nvmetro-kernel)
 
@@ -30,11 +41,11 @@ For disk encryption evaluations:
 - Dell Precision 7540, Intel Core i5-9400H, 16 GB of RAM (2x8GB), Samsung SSD 970 EVO Plus 1TB
 - SGX is enabled in BIOS with 128 MB EPC
 
-Each machine must have a dedicated NVMe disk (of the same make and model, and preferably the same model shown above).
+Each machine must have a **dedicated** NVMe disk (preferably of the same make and model as shown above).
 Virtualization and IOMMU must be enabled on all machines.
-The procedure has only been tested on Intel machines, AMD ones are untested.
+The procedure has only been tested on Intel machines, AMD-based machines are unsupported.
 
-The installation of NVMetro must be carried out on **one single server** as well as the laptop to run SGX evaluations.
+⚠️ The installation of NVMetro must be carried out on **one single server** as well as the laptop (for SGX evaluations).
 The other server serves as the NVMeoF target for disk replication evaluations, and necessitates a different configuration process.
 
 Software environment
@@ -52,17 +63,19 @@ Software environment
 Installation
 ============
 
-To avoid unexpected issues, it is required to run all of the steps detailed below **as root**, inside the root home directory (`/root`).
-For clarity and to avoid breaking lines when copying commands, each line is prefixed with `#` in the instructions, please be sure to remove them before running the command.
+⚠️ To avoid unexpected issues, it is required to run all of the steps detailed below **as root**, inside the root home directory (`/root`).
+For clarity and to avoid breaking lines when copying commands, each line is prefixed with `#` in the instructions (`>` for PowerShell), please be sure to remove them before running the command.
 
 Download the NVMetro AE package and extract them directly inside `/root`, following this structure:
 
     /root/
-        nvmetro-ae/
-            apt.txt
-            install.sh
-            ...
-        nvmetro.qcow2
+        ├─nvmetro-ae/
+        │   ├─apt.txt
+        │   └─install.sh
+        │     ...
+        └─nvmetro.qcow2
+
+Note that the location of `nvmetro.qcow2` is directly inside `/root`.
 
 Dependencies
 ------------
@@ -74,7 +87,7 @@ To save time and effort, the bundled script `nvmetro-ae/install.sh` is capable o
     # cd nvmetro-ae
     # ./install.sh
 
-**Reboot after installation** to use the new kernel and configurations.
+⚠️ **Reboot after installation** to use the new kernel and configurations.
 
 Extracting and building the tools
 ---------------------------------
@@ -104,8 +117,8 @@ Lines with `CHANGE THIS` must be changed to fit your hardware.
     spdk=../spdk
     laptop_hostname=nvme-sgx  # <-- CHANGE THIS for laptop-based evaluations
 
-    target_ip=192.168.0.3  # <-- CHANGE THIS
-    target_localpath=/dev/nvme0n1  # <-- CHANGE THIS
+    target_ip=192.168.0.3  # <-- CHANGE THIS: IP of remote NVMe target
+    target_localpath=/dev/nvme0n1  # <-- CHANGE THIS: local NVMe disk as seen inside the remote NVMe target server
 
     if [ "$(hostname)" = "$laptop_hostname" ]  # NVMetro configuration on laptop (for SGX encryption evals)
     then
@@ -114,7 +127,7 @@ Lines with `CHANGE THIS` must be changed to fit your hardware.
     hcpus=2,3,6,7  # <-- CHANGE THIS to set the affinity of VM's vCPUs
     mthreads=2  # <-- Number of UIF threads
     sgx_mthreads=1  # <-- Number of SGX UIF threads
-    mcpus=0,1,4,5  # <-- CHANGE THIS: UIF affinity (see numactl -C). I chose 4 logical CPUs corresponding to 2 physical cores here.
+    mcpus=0,1,4,5  # <-- CHANGE THIS: UIF affinity (see numactl -C); I chose 4 logical CPUs corresponding to 2 physical cores here
     spdkcpus=0x3  # <-- CHANGE THIS: SPDK affinity (see https://spdk.io/doc/app_overview.html)
     nvmeblk=/dev/nvme1n1  # CHANGE THIS: path to the NVMe disk for evaluations
     nvme=0000:6f:00.0  # CHANGE THIS: PCI address of the NVMe disk (see `lspci -D`)
@@ -138,43 +151,49 @@ Set both adapters to **connected** mode with a MTU of **65520**.
 When using Netplan, this can be done by putting the following script in `/etc/networkd-dispatcher/configuring.d/50-infiniband.sh` (remember to `chmod +x`):
 
     #!/bin/sh
-    if [ "$IFACE" = "ibp8s0" ]  # replace with your Infiniband interface name
+    if [ "$IFACE" = "ibp8s0" ]  # CHANGE THIS: replace with your Infiniband interface name
     then
         echo connected > /sys/class/net/$IFACE/mode
         echo 65520 > /sys/class/net/$IFACE/mtu
     fi
 
-**NVMeoF server**
+### Setting up the NVMeoF target
 
-On a **dedicated** machine (not running NVMetro evaluations), set up the NVMeoF target (i.e. server):
+On a **dedicated** machine (not running NVMetro evaluations), extract the AE package **but do not build or install it**. Then set up the NVMeoF target:
 
     # cd nvmetro-ae
     # ./install-nvmeof.sh
 
 Run the following command, replacing `a.b.c.d` with the IP of the target's Infiniband interface; and `/dev/nvmeXnX` with the local NVMe disk of the target:
 
-    # jq ".ports[0].addr.traddr=\"a.b.c.d\" | .subsystems[0].namespaces[0].device.path=\"/dev/nvmeXnX\"" config.json > /etc/nvmet/config.json
+    # jq '.ports[0].addr.traddr="a.b.c.d" | .subsystems[0].namespaces[0].device.path="/dev/nvmeXnX"' config.json > /etc/nvmet/config.json
+
+⚠️ Don't delete any surrounding quotes.
 
 Apply the NVMeoF configuration:
 
     # cd /root/nvmetcli
     # ./nvmetcli restore
 
-Finally, to allow automatic formatting of the remote disk, **you must allow SSH-ing to the `root` account of this server without a password from the NVMetro evaluation server**.
+⚠️ Finally, to allow automatic formatting of the remote disk, **you must allow SSH-ing from the NVMetro evaluation server to the `root` account of this server without a password**.
 
-**NVMeoF client**
+### Setting up the NVMeoF client
 
 On the computer that's running the NVMetro evaluations, put the following line in `/etc/nvme/discovery.conf`:
 
     --transport=rdma --traddr=a.b.c.d --trsvcid=4420 --nr-poll-queues=1
 
-Replace `a.b.c.d` with the IP of the NVMeoF target (server) used above.
+⚠️ Replace `a.b.c.d` with the IP of the NVMeoF target used above.
 
-Run the following command to test the connection:
+Run the following command to test the connection or to prepare for the replication evaluations:
 
     # nvme connect-all
 
-The remote disk should then appear. Note the path of the disk on the client (to be set as the `nvmerepl` configuration above). To disconnect from the target:
+The remote disk should then appear. Note the path of the disk on the client.
+
+⚠️ Set this path as the `nvmerepl` configuration as seen in `vmscripts/vars.sh` above.
+
+To disconnect from the target when you're done evaluating:
 
     # nvme disconnect-all
 
@@ -218,12 +237,12 @@ You should reserve an IP address for each MAC listed above to ensure that the VM
 
 Finally, test the connection to the VMUT with SSH. The default credential of the VMUT is `root/123456`.
 
-**You must make sure that you can SSH to the VMUT from the host without a password.**
+⚠️ **You must make sure that you can SSH from the host to the VMUT as `root` without a password.**
 
 Running the evaluation
 ----------------------
 
-**Note:** Before running the replication evaluations, you must configure NVMeoF as described above.
+⚠️ Before running the replication evaluations, you must configure NVMeoF as described above. Run `./nvmetcli restore` on the target followed by `nvme connect-all` on the evaluation host.
 
 Evaluation of NVMetro requires PowerShell, which should be installed by our preparation script.
 Start PowerShell from the evaluation script directory:
@@ -253,12 +272,91 @@ The `BenchPrefix` argument is the name of the experiment, and is listed **as an 
 You can rename the argument as necessary, but it should be in the form `hostname-experimentname`, with only one dash and without special characters in each word (i.e. only `[a-zA-Z0-9]+`).
 This helps the result parser recognize the results.
 
-Gathering and presenting results
---------------------------------
+An example of the usage of `doall.ps1` (replace `a.b.c.d` with the VMUT's IP address):
 
-Most results will be stored directly on the host in a directory called `nmbpf`.
+    > ./doall.ps1 -TargetHost a.b.c.d -TargetDevice /dev/nvme0n1 -FormatMode Mdev -BenchPrefix server-bpfpt
+
+Running the evaluations (COW)
+=============================
+
+When running COW experiments, the steps are as follows:
+
+1. Format COW
+2. Random fill
+3. Snapshot
+4. Start VM
+5. Run evaluations (use `./doall-cow.ps1 FormatMode None ...`)
+6. Revert to snapshot
+7. Repeat from step 4
+8. Finalize/cleanup
+
+Random fill command (in VM): `./fill-random-vm.ps1 -TargetHost CHANGEME -TargetDevice CHANGEME`
+
+QEMU (`qcow`)
+-------------
+
+Format COW: `./format-qcow.sh`
+
+Random fill:
+- Start VM with `./run-qemu-qcow-base.sh`
+- Use random fill command (in VM) above
+- Shutdown VM
+
+Snapshot + revert: `./recreate-qcow.sh`
+
+Start VM: `./run-qemu-qcow-top.sh`
+
+Finalize: `umount /mnt/nvqcow`
+
+LVM (`lcow`)
+------------
+
+Format COW: `./format-lcow.sh` (random fill + snapshot are included)
+
+Revert: `./recreate-lcow.sh`
+
+Finalize: `vgchange -an`
+
+SPDK (`spdkcow`)
+----------------
+
+Format COW: `./format-spdkcow.sh`
+
+Random fill:
+- Start VM with `./run-qemu-spdkcow.sh`
+- Use random fill command (in VM) above
+- Shutdown VM
+
+Snapshot: `./snap-spdkcow.sh`
+
+Start VM: `./run-qemu-spdkcow.sh`
+
+Revert: `./recreate-spdkcow.sh` (be patient)
+
+XCOW (`xcow`)
+-------------
+
+Format COW: `./format-xcow.sh`
+
+Random fill:
+- Start VM with `./run-qemu-xcow.sh`
+- Use random fill command (in VM) above
+- `scp ../mdev-client/writerand keyfile root@CHANGEME:`
+- Shutdown VM
+
+Snapshot: `./snap-xcow.sh`
+
+Start VM: `./run-qemu-xcow.sh`
+
+Revert: `./recreate-xcow.sh`
+
+Gathering and presenting results
+================================
+
+Most results will be stored directly on the host in the `/root/nmbpf` directory.
 Parts of the results are stored on the VMUT, copy it to the host:
 
+    # cd /root
     # scp -r a.b.c.d:nmbpf/ .
 
 Replace `a.b.c.d` with the VMUT's IP address.
@@ -273,7 +371,7 @@ The NVMetro results require PowerShell to parse. Use the following commands:
 The parser script will produce a list of `.csv` files containing the compiled experiment results.
 The formats of these results are detailed below:
 
-**Fio performance**: `fio.csv`
+### Fio performance: `fio.csv`
 
 | Column name | Meaning                                  |
 | ----------- | ---------------------------------------- |
@@ -287,7 +385,7 @@ The formats of these results are detailed below:
 | `read_ios`  | Number of reads performed in 10 seconds  |
 | `write_ios` | Number of writes performed in 10 seconds |
 
-**YCSB performance**: `ycsb.csv`
+### YCSB performance: `ycsb.csv`
 
 | Column name | Meaning                                         |
 | ----------- | ----------------------------------------------- |
@@ -301,7 +399,7 @@ The formats of these results are detailed below:
 | `step`      | YCSB step (load/run)                            |
 | `jobno`     | Number of individual job (out of `nrjobs` jobs) |
 
-**Kernbench performance**: `kernbench.csv`
+### Kernbench performance: `kernbench.csv`
 
 | Column name | Meaning                                  |
 | ----------- | ---------------------------------------- |
@@ -313,7 +411,7 @@ The formats of these results are detailed below:
 | `user`      | User time, as reported by `time(1)`      |
 | `elapsed`   | Elapsed time, as reported by `time(1)`   |
 
-**CPU usage**: `cpu-*.csv`
+### CPU usage: `cpu-*.csv`
 
 The CPU time columns (`user`, `nice`, etc.) follow the ones defined in `/proc/stat` (see `proc(5)`).
 Other columns follow the definitions listed in the above sections.
@@ -360,10 +458,10 @@ Use the existing configuration available in the AE package to install the kernel
 
     # cp nvmetro-ae/linux-config linux-mdev-nvme/.config
     # cd linux-mdev-nvme
-    # make headers_install
+    # make headers_install -j8
     # make all -j8
     # make -C tools bpf -j8
     # make M=samples/bpf -j8
-    # make modules_install
+    # make modules_install -j8
     # make install
     # reboot

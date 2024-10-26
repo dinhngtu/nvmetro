@@ -1,0 +1,9 @@
+label: gpt
+label-id: 34988C59-7BA7-4259-8816-BCCAD73816CF
+device: /dev/nvme0n1
+unit: sectors
+first-lba: 34
+last-lba: 1953525134
+
+/dev/nvme0n1p1 : start=        2048, size=    20969472, type=0FC63DAF-8483-4772-8E79-3D69D8477DE4, uuid=515C2DA6-CC9D-42C6-9678-89886DFAF30B
+/dev/nvme0n1p2 : start=    20971520, size=  1932552192, type=0FC63DAF-8483-4772-8E79-3D69D8477DE4, uuid=B05E67A2-E035-4E87-8FE9-309A8EEE31D4

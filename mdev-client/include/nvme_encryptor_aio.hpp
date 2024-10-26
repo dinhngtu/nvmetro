@@ -4,7 +4,6 @@
 #include <utility>
 #include <sys/uio.h>
 
-#include "aligned_allocator.hpp"
 #include "nvme.hpp"
 #include "crypto/tbc.hpp"
 #include "util/uring.hpp"
@@ -52,5 +51,4 @@ private:
     std::array<int, 1> _bfd;
     std::unique_ptr<tweakable_block_cipher> _engine;
     uring _ring;
-    aligned_allocator<unsigned char, NVME_PAGE_SIZE> allocator{};
 };

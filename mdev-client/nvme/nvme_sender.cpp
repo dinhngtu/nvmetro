@@ -16,8 +16,7 @@ nvme_sender::nvme_sender(const std::shared_ptr<mapping> &vm, int nfd, int bfd) :
     _wvec.reserve(1 << id_vctrl()->mdts);
 }
 
-__u16 nvme_sender::receive_write(size_t sq, const nvme_command &cmd) {
-    (void)sq;
+__u16 nvme_sender::receive_write([[maybe_unused]] size_t sq, const nvme_command &cmd) {
     auto slba = cmd.rw.slba;
     size_t nblocks = static_cast<size_t>(cmd.rw.length) + 1;
     int lbas = ns_lba_shift(cmd.rw.nsid);
@@ -33,7 +32,7 @@ __u16 nvme_sender::receive_write(size_t sq, const nvme_command &cmd) {
         _wvec.push_back(iovec{.iov_base = lbad.data(), .iov_len = lbad.size()});
     }
 
-    auto ret = pwritev(_bfd, _wvec.data(), _wvec.size(), slba << lbas);
+    auto ret = pwritev2(_bfd, _wvec.data(), _wvec.size(), slba << lbas, (cmd.rw.control & NVME_RW_FUA) ? RWF_DSYNC : 0);
     if (ret != static_cast<ssize_t>(nbytes)) {
         // writev/pwritev should be atomic
         printf("failed or short write %zd\n", ret);
@@ -43,8 +42,7 @@ __u16 nvme_sender::receive_write(size_t sq, const nvme_command &cmd) {
     }
 }
 
-__u16 nvme_sender::receive_write_zeroes(size_t sq, const nvme_command &cmd) {
-    (void)sq;
+__u16 nvme_sender::receive_write_zeroes([[maybe_unused]] size_t sq, const nvme_command &cmd) {
     auto slba = cmd.rw.slba;
     size_t nblocks = static_cast<size_t>(cmd.rw.length) + 1;
     int lbas = ns_lba_shift(cmd.rw.nsid);
@@ -64,9 +62,7 @@ __u16 nvme_sender::receive_write_zeroes(size_t sq, const nvme_command &cmd) {
     }
 }
 
-__u16 nvme_sender::receive_flush(size_t sq, const nvme_command &cmd) {
-    (void)sq;
-    (void)cmd;
+__u16 nvme_sender::receive_flush([[maybe_unused]] size_t sq, [[maybe_unused]] const nvme_command &cmd) {
     if (fdatasync(_bfd) < 0) {
         return NVME_SC_DNR | NVME_SC_INTERNAL;
     } else {
@@ -74,8 +70,7 @@ __u16 nvme_sender::receive_flush(size_t sq, const nvme_command &cmd) {
     }
 }
 
-__u16 nvme_sender::receive(size_t sq, const nvme_command &cmd) {
-    (void)sq;
+__u16 nvme_sender::receive([[maybe_unused]] size_t sq, const nvme_command &cmd) {
     try {
         if (cmd.common.opcode == nvme_cmd_write) {
             DBG_PRINTF(

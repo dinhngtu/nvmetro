@@ -5,7 +5,7 @@ param(
     [Parameter(Mandatory)]$TargetDevice,
     [Parameter(Mandatory)]$BenchPrefix,
     [Parameter(Mandatory)][ValidateSet("Passthrough", "Mdev", "Repl", "Spdk", "None")][string]$FormatMode,
-    [Parameter()][int]$BreakTime = 300,
+    [Parameter()][int]$BreakTime = 60,
     [Parameter()][switch]$NoCpuFreq,
     [Parameter()][switch]$NoFio,
     [Parameter()][switch]$NoKernbench,
@@ -15,6 +15,9 @@ param(
 )
 
 Set-StrictMode -Version Latest
+
+$attempts = @("1", "2", "3")
+#$attempts = @("1")
 
 $fioscens = @(
     "bs512-trandread-iod1-j1",
@@ -113,6 +116,14 @@ function Format-Device {
     Start-Sleep -Seconds 30
 }
 
+function Out-Bell {
+    param([int]$Count = 1)
+    for ($i = 0; $i -lt $Count; $i++) {
+        [Console]::Beep()
+        Start-Sleep -Milliseconds 1100
+    }
+}
+
 $exists = icm -HostName $TargetHost -UserName root -ScriptBlock { Test-Path -PathType Leaf $Using:TargetDevice }
 if (!$exists) {
     throw "Block device doesn't exist"
@@ -128,45 +139,46 @@ if (-not $NoCpuFreq) {
 }
 
 if (-not $NoFio) {
-    foreach ($i in @('1', '2', '3')) {
-    #foreach ($i in @('1')) {
+    foreach ($i in $attempts) {
         foreach ($scen in $fioscens) {
             Format-Device -TargetHost $TargetHost -TargetDevice $TargetDevice -FormatMode $FormatMode
             ./bench-fio.ps1 -TargetHost $TargetHost -BenchName $BenchPrefix-$i -Scenario $scen -TargetDevice $TargetDevice
         }
     }
-    tput bel
+    Out-Bell
     Start-Sleep -Seconds $BreakTime
 }
 
 if (-not $NoKernbench) {
-    foreach ($i in @('1', '2', '3')) {
+    foreach ($i in $attempts) {
         Format-Device -TargetHost $TargetHost -TargetDevice $TargetDevice -FormatMode $FormatMode
         ./bench-kernbench.ps1 -TargetHost $TargetHost -BenchName $BenchPrefix-$i -TargetDevice $TargetDevice
     }
-    tput bel
+    Out-Bell
     Start-Sleep -Seconds $BreakTime
 }
 
 if (-not $NoYcsb) {
     if (-not $NoYcsb1) {
-        foreach ($i in @('1', '2', '3')) {
+        foreach ($i in $attempts) {
             foreach ($wl in @('a', 'b', 'c', 'd', 'e', 'f')) {
                 Format-Device -TargetHost $TargetHost -TargetDevice $TargetDevice -FormatMode $FormatMode
                 ./bench-ycsb.ps1 -TargetHost $TargetHost -BenchName $BenchPrefix-j1-$i -Workload $wl -NumJobs 1 -TargetDevice $TargetDevice
             }
         }
-        tput bel
+        Out-Bell
         Start-Sleep -Seconds $BreakTime
     }
 
     if (-not $NoYcsb4) {
-        foreach ($i in @('1', '2', '3')) {
+        foreach ($i in $attempts) {
             foreach ($wl in @('a', 'b', 'c', 'd', 'e', 'f')) {
                 Format-Device -TargetHost $TargetHost -TargetDevice $TargetDevice -FormatMode $FormatMode
                 ./bench-ycsb.ps1 -TargetHost $TargetHost -BenchName $BenchPrefix-j4-$i -Workload $wl -NumJobs 4 -TargetDevice $TargetDevice
             }
         }
-        tput bel
+        Out-Bell
     }
 }
+
+Out-Bell -Count 5

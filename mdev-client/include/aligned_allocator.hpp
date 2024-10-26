@@ -4,6 +4,7 @@
 #include <limits>
 #include <memory>
 #include <cstddef>
+#include <mimalloc.h>
 
 template <class T, size_t N = sizeof(T)>
 class aligned_allocator {
@@ -31,19 +32,11 @@ public:
     }
 
     [[nodiscard]] constexpr T *allocate(size_t n) {
-        if (std::numeric_limits<std::size_t>::max() / sizeof(T) < n) {
-            throw std::bad_array_new_length();
-        }
-        // round up to alignment
-        auto asize = (sizeof(T) * n + N - 1) & ~(N - 1);
-        auto ret = static_cast<T *>(aligned_alloc(N, asize));
-        if (!ret)
-            throw std::bad_alloc();
-        return ret;
+        return mi_new_aligned(n, N);
     }
 
     constexpr void deallocate(T *p, size_t) {
-        free(p);
+        mi_free(p);
     }
 
     constexpr size_t max_size() const noexcept {

@@ -6,8 +6,8 @@ mcinfo=/dev/null
 memfile=/mnt/huge0/mdev.mem
 vmdisk=../vm-$(hostname).qcow2
 #vmdisk=../nvmetro.qcow2
-spdk=../spdk
-laptop_hostname=nvme-sgx
+spdk=../spdk2309
+laptop_hostname=nvmetro-ae-laptop
 
 target_ip=192.168.0.3
 target_localpath=/dev/nvme0n1
@@ -23,7 +23,7 @@ sgx_mthreads=1
 mcpus=0,1,4,5
 spdkcpus=0x3
 nvmeblk=/dev/nvme1n1
-nvme=0000:6f:00.0
+nvme=0000:70:00.0
 else  # server
 guest_mac=ce:76:f8:2e:f1:6b
 cpus=8
@@ -44,6 +44,21 @@ multi_hcpus=(4 6 8 10)
 multi_mcpus=2
 multi_vmdisks=(../vm-multi0.qcow2 ../vm-multi1.qcow2 ../vm-multi2.qcow2 ../vm-multi3.qcow2)
 multi_nvmeblks=(/dev/nvme0n1p1 /dev/nvme0n1p2 /dev/nvme0n1p3 /dev/nvme0n1p4)
+
+#xcow_mapfile=/tmp/xcow.map
+xcow_mapfile=${nvmeblk}p1
+xcow_nvmeblk=${nvmeblk}p2
+xcow_fsize=$((100*2**30))
+
+qcow_mnt=/mnt/nvqcow
+qcow_base=$qcow_mnt/nvbase.qcow2
+qcow_top=$qcow_mnt/nv.qcow2
+
+l_vgname=lcow
+l_lv_base=lbase
+l_path_base=/dev/$l_vgname/$l_lv_base
+l_lv_top=ltop
+l_path_top=/dev/$l_vgname/$l_lv_top
 
 cleanup_mdev() {
     echo -n "Cleaning up... "
@@ -110,6 +125,16 @@ cleanup_spdk() {
     echo "success"
 }
 
+cleanup_lvm() {
+    echo -n "Cleaning up... "
+    sleep 1
+    rm -f $memfile || true
+    targetctl clear || true
+    vgchange -an nvmetro || true
+    wipefs -a $nvmeblk || true
+    echo "success"
+}
+
 cleanup_vtap() {
     echo -n "Cleaning up... "
     sleep 1
@@ -139,19 +164,8 @@ make_spdk() {
     $spdk/build/bin/vhost -S /var/tmp -m $spdkcpus >$mcinfo 2>&1 &
     sleep 2
     $spdk/scripts/rpc.py bdev_nvme_attach_controller -b nvme0 -t pcie -a $nvme
-    $spdk/scripts/rpc.py vhost_create_blk_controller --cpumask $spdkcpus vhost.0 nvme0n1
     $spdk/scripts/rpc.py bdev_nvme_cuse_register -n nvme0
-}
-
-make_encspdk() {
-    driverctl --nosave set-override $nvme vfio-pci
     sleep 2
-    $spdk/build/bin/vhost -S /var/tmp -m $spdkcpus >$mcinfo 2>&1 &
-    sleep 2
-    $spdk/scripts/rpc.py bdev_nvme_attach_controller -b nvme0 -t pcie -a $nvme
-    $spdk/scripts/rpc.py bdev_crypto_create nvme0n1 encnvme crypto_aesni_mb 0123456789123456
-    $spdk/scripts/rpc.py vhost_create_blk_controller --cpumask $spdkcpus vhost.0 encnvme
-    $spdk/scripts/rpc.py bdev_nvme_cuse_register -n nvme0
 }
 
 make_vtap() {
@@ -160,7 +174,9 @@ make_vtap() {
     echo "/dev/tap$(cat /sys/class/net/vmtap/ifindex)"
 }
 
-qemu="numactl -m 0 -C $hcpus -- qemu-system-x86_64"
+qemu_bin="qemu-system-x86_64"
+qemu="numactl -m 0 -C $hcpus -- $qemu_bin"
+qemu_img="qemu-img"
 vms="-name mdev-vm,debug-threads=on \
     -machine q35,accel=kvm,memory-backend=mem \
     -nodefaults \

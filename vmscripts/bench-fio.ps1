@@ -72,15 +72,15 @@ $Scenarios = @{
     "lat-bs512-trandwrite-iod1-j1"      = @("--bs=512", "--rw=randwrite", "--iodepth=1", "--numjobs=1", "--rate_iops=10000");
     "lat-bs512-trandwrite-iod128-j1"    = @("--bs=512", "--rw=randwrite", "--iodepth=128", "--numjobs=1", "--rate_iops=10000");
 
-    "lat-bs16384-trandread-iod1-j1"     = @("--bs=16384", "--rw=randread", "--iodepth=1", "--numjobs=1", "--rate_iops=10000");
-    "lat-bs16384-trandread-iod128-j1"   = @("--bs=16384", "--rw=randread", "--iodepth=128", "--numjobs=1", "--rate_iops=10000");
-    "lat-bs16384-trandwrite-iod1-j1"    = @("--bs=16384", "--rw=randwrite", "--iodepth=1", "--numjobs=1", "--rate_iops=10000");
-    "lat-bs16384-trandwrite-iod128-j1"  = @("--bs=16384", "--rw=randwrite", "--iodepth=128", "--numjobs=1", "--rate_iops=10000");
+    "lat-bs16384-trandread-iod1-j1"     = @("--bs=16k", "--rw=randread", "--iodepth=1", "--numjobs=1", "--rate_iops=10000");
+    "lat-bs16384-trandread-iod128-j1"   = @("--bs=16k", "--rw=randread", "--iodepth=128", "--numjobs=1", "--rate_iops=10000");
+    "lat-bs16384-trandwrite-iod1-j1"    = @("--bs=16k", "--rw=randwrite", "--iodepth=1", "--numjobs=1", "--rate_iops=10000");
+    "lat-bs16384-trandwrite-iod128-j1"  = @("--bs=16k", "--rw=randwrite", "--iodepth=128", "--numjobs=1", "--rate_iops=10000");
 
-    "lat-bs131072-trandread-iod1-j1"    = @("--bs=131072", "--rw=randread", "--iodepth=1", "--numjobs=1", "--rate_iops=10000");
-    "lat-bs131072-trandread-iod128-j1"  = @("--bs=131072", "--rw=randread", "--iodepth=128", "--numjobs=1", "--rate_iops=10000");
-    "lat-bs131072-trandwrite-iod1-j1"   = @("--bs=131072", "--rw=randwrite", "--iodepth=1", "--numjobs=1", "--rate_iops=10000");
-    "lat-bs131072-trandwrite-iod128-j1" = @("--bs=131072", "--rw=randwrite", "--iodepth=128", "--numjobs=1", "--rate_iops=10000");
+    "lat-bs131072-trandread-iod1-j1"    = @("--bs=128k", "--rw=randread", "--iodepth=1", "--numjobs=1", "--rate_iops=10000");
+    "lat-bs131072-trandread-iod128-j1"  = @("--bs=128k", "--rw=randread", "--iodepth=128", "--numjobs=1", "--rate_iops=10000");
+    "lat-bs131072-trandwrite-iod1-j1"   = @("--bs=128k", "--rw=randwrite", "--iodepth=1", "--numjobs=1", "--rate_iops=10000");
+    "lat-bs131072-trandwrite-iod128-j1" = @("--bs=128k", "--rw=randwrite", "--iodepth=128", "--numjobs=1", "--rate_iops=10000");
 
     ####### 2nd round latency benches
 
@@ -89,15 +89,15 @@ $Scenarios = @{
     "lat-bs512-trandwrite-iod4-j1"      = @("--bs=512", "--rw=randwrite", "--iodepth=4", "--numjobs=1", "--rate_iops=10000");
     "lat-bs512-trandwrite-iod32-j1"     = @("--bs=512", "--rw=randwrite", "--iodepth=32", "--numjobs=1", "--rate_iops=10000");
 
-    "lat-bs16384-trandread-iod4-j1"     = @("--bs=16384", "--rw=randread", "--iodepth=4", "--numjobs=1", "--rate_iops=10000");
-    "lat-bs16384-trandread-iod32-j1"    = @("--bs=16384", "--rw=randread", "--iodepth=32", "--numjobs=1", "--rate_iops=10000");
-    "lat-bs16384-trandwrite-iod4-j1"    = @("--bs=16384", "--rw=randwrite", "--iodepth=4", "--numjobs=1", "--rate_iops=10000");
-    "lat-bs16384-trandwrite-iod32-j1"   = @("--bs=16384", "--rw=randwrite", "--iodepth=32", "--numjobs=1", "--rate_iops=10000");
+    "lat-bs16384-trandread-iod4-j1"     = @("--bs=16k", "--rw=randread", "--iodepth=4", "--numjobs=1", "--rate_iops=10000");
+    "lat-bs16384-trandread-iod32-j1"    = @("--bs=16k", "--rw=randread", "--iodepth=32", "--numjobs=1", "--rate_iops=10000");
+    "lat-bs16384-trandwrite-iod4-j1"    = @("--bs=16k", "--rw=randwrite", "--iodepth=4", "--numjobs=1", "--rate_iops=10000");
+    "lat-bs16384-trandwrite-iod32-j1"   = @("--bs=16k", "--rw=randwrite", "--iodepth=32", "--numjobs=1", "--rate_iops=10000");
 
-    "lat-bs131072-trandread-iod4-j1"    = @("--bs=131072", "--rw=randread", "--iodepth=4", "--numjobs=1", "--rate_iops=10000");
-    "lat-bs131072-trandread-iod32-j1"   = @("--bs=131072", "--rw=randread", "--iodepth=32", "--numjobs=1", "--rate_iops=10000");
-    "lat-bs131072-trandwrite-iod4-j1"   = @("--bs=131072", "--rw=randwrite", "--iodepth=4", "--numjobs=1", "--rate_iops=10000");
-    "lat-bs131072-trandwrite-iod32-j1"  = @("--bs=131072", "--rw=randwrite", "--iodepth=32", "--numjobs=1", "--rate_iops=10000");
+    "lat-bs131072-trandread-iod4-j1"    = @("--bs=128k", "--rw=randread", "--iodepth=4", "--numjobs=1", "--rate_iops=10000");
+    "lat-bs131072-trandread-iod32-j1"   = @("--bs=128k", "--rw=randread", "--iodepth=32", "--numjobs=1", "--rate_iops=10000");
+    "lat-bs131072-trandwrite-iod4-j1"   = @("--bs=128k", "--rw=randwrite", "--iodepth=4", "--numjobs=1", "--rate_iops=10000");
+    "lat-bs131072-trandwrite-iod32-j1"  = @("--bs=128k", "--rw=randwrite", "--iodepth=32", "--numjobs=1", "--rate_iops=10000");
 }
 
 $BenchOutPath = "$OutputPath/fio-$BenchName"
@@ -122,7 +122,7 @@ Invoke-Command -Session $session -ScriptBlock {
     $scen = $Using:Scenario
     $Scenarios = $Using:Scenarios
     $scenconfig = $Scenarios[$scen]
-    sudo fio @scenconfig `
+    sudo fio `
         --output-format=json `
         --size=100g `
         --ioengine=io_uring `
@@ -133,6 +133,7 @@ Invoke-Command -Session $session -ScriptBlock {
         --time_based `
         --runtime=10 `
         --filename=$Using:TargetDevice `
+        @scenconfig `
         > ${Using:BenchOutPath}/${scen}
 }
 Get-Content /proc/stat > $BenchOutPath/cpu-${scen}-post

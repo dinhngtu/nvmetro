@@ -13,3 +13,9 @@ extern "C" {
 
 constexpr size_t NVME_PAGE_SHIFT = 12;
 constexpr size_t NVME_PAGE_SIZE = 1 << NVME_PAGE_SHIFT;
+
+struct hmb_dl_entry {
+    uint64_t badd;
+    uint32_t bpages;
+    uint32_t _rsvd;
+} __attribute__((packed));

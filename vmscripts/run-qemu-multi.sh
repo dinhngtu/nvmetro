@@ -47,7 +47,7 @@ do
 
     echo "guest_mac $guest_mac"
 
-    qemu="numactl -m 0 -C $hcpus -- qemu-system-x86_64"
+    qemu="numactl -m 0 -C $hcpus -- $qemu_bin"
     vms="-name mdev-vm$i,debug-threads=on \
         -machine q35,accel=kvm,memory-backend=mem \
         -nodefaults \
