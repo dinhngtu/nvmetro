@@ -1,4 +1,0 @@
-d465472a-4982-462a-a7fa-0671931b11ce /sys/bus/mdev/devices/d465472a-4982-462a-a7fa-0671931b11ce /dev/vfio/68
-cce0c9b6-14e9-4756-8cb9-c39187c0f786 /sys/bus/mdev/devices/cce0c9b6-14e9-4756-8cb9-c39187c0f786 /dev/vfio/69
-019d17cd-399c-4463-9b9c-9559a5ac75f0 /sys/bus/mdev/devices/019d17cd-399c-4463-9b9c-9559a5ac75f0 /dev/vfio/70
-0b812c82-7d17-4acb-8918-0da9b06efc5f /sys/bus/mdev/devices/0b812c82-7d17-4acb-8918-0da9b06efc5f /dev/vfio/71

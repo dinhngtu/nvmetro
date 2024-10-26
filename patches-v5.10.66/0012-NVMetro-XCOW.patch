@@ -1,0 +1,2488 @@
+From 31a82c9bcca05272de64eb9c124844035b0b58d3 Mon Sep 17 00:00:00 2001
+From: Tu Dinh Ngoc <dinhngoc.tu@irit.fr>
+Date: Sat, 26 Oct 2024 15:00:58 +0000
+Subject: [PATCH 12/12] NVMetro XCOW
+
+---
+ drivers/nvme/mdev/Makefile     |   5 +-
+ drivers/nvme/mdev/adm.c        | 156 ++++++++++---
+ drivers/nvme/mdev/bpf.c        |  51 ++++-
+ drivers/nvme/mdev/bpf_sm.c     |   4 +-
+ drivers/nvme/mdev/bpf_sm.h     |  21 +-
+ drivers/nvme/mdev/features.c   | 109 +++++++++
+ drivers/nvme/mdev/host.c       |  23 +-
+ drivers/nvme/mdev/instance.c   | 139 ++++--------
+ drivers/nvme/mdev/io.c         |  71 ++++--
+ drivers/nvme/mdev/mmio.c       |   6 +-
+ drivers/nvme/mdev/notifyfd.c   | 176 +++++++++++++--
+ drivers/nvme/mdev/notifyfd.h   |  10 +-
+ drivers/nvme/mdev/priv.h       |  63 +++++-
+ drivers/nvme/mdev/settings.c   | 400 +++++++++++++++++++++++++++++++++
+ drivers/nvme/mdev/vctrl.c      |  21 +-
+ drivers/nvme/mdev/vns.c        |   3 +
+ drivers/nvme/mdev/vsq.c        |   3 +
+ include/linux/bpf_nvme_mdev.h  |  12 +-
+ include/uapi/linux/bpf.h       |   7 +
+ include/uapi/linux/nvme_mdev.h |   5 +
+ samples/bpf/Makefile           |   2 +
+ samples/bpf/nmbpf_xcow.c       | 263 ++++++++++++++++++++++
+ samples/bpf/nmbpf_xcownc.c     |  63 ++++++
+ tools/include/uapi/linux/bpf.h |   7 +
+ 24 files changed, 1399 insertions(+), 221 deletions(-)
+ create mode 100644 drivers/nvme/mdev/features.c
+ create mode 100644 drivers/nvme/mdev/settings.c
+ create mode 100644 samples/bpf/nmbpf_xcow.c
+ create mode 100644 samples/bpf/nmbpf_xcownc.c
+
+diff --git a/drivers/nvme/mdev/Makefile b/drivers/nvme/mdev/Makefile
+index 5d09b1b0d31c..e9d0fd89cc6f 100644
+--- a/drivers/nvme/mdev/Makefile
++++ b/drivers/nvme/mdev/Makefile
+@@ -2,6 +2,7 @@
+ obj-$(CONFIG_NVME_MDEV_VFIO) 	+=	nvme-mdev.o
+ obj-$(CONFIG_NVME_MDEV_BPF)	+=	bpf.o
+ 
+-nvme-mdev-y += adm.o events.o instance.o host.o io.o iothreads.o irq.o \
+-	       udata.o viommu.o vns.o vsq.o vcq.o vctrl.o mmio.o pci.o
++nvme-mdev-y += adm.o events.o settings.o features.o instance.o host.o io.o \
++	       iothreads.o irq.o udata.o viommu.o vns.o vsq.o vcq.o vctrl.o \
++	       mmio.o pci.o
+ nvme-mdev-$(CONFIG_NVME_MDEV_BPF) += notifyfd.o bpf_sm.o
+diff --git a/drivers/nvme/mdev/adm.c b/drivers/nvme/mdev/adm.c
+index 7ff63b78df7c..df45a4261fa1 100644
+--- a/drivers/nvme/mdev/adm.c
++++ b/drivers/nvme/mdev/adm.c
+@@ -7,19 +7,11 @@
+ #include <linux/kernel.h>
+ #include <linux/slab.h>
+ #include "priv.h"
++#include "notifyfd.h"
+ 
+-struct adm_ctx {
+-	struct nvme_mdev_vctrl *vctrl;
+-	struct nvme_mdev_hctrl *hctrl;
+-	const struct nvme_command *in;
+-	struct nvme_mdev_vns *ns;
+-	struct nvme_ext_data_iter udatait;
+-	unsigned int datalen;
+-};
+-
+-void __nvme_mdev_adm_id_vctrl(struct nvme_mdev_vctrl *vctrl,
+-			      struct nvme_mdev_hctrl *hctrl,
+-			      struct nvme_id_ctrl *id)
++static void __nvme_mdev_adm_id_vctrl_init(struct nvme_mdev_vctrl *vctrl,
++					  struct nvme_mdev_hctrl *hctrl,
++					  struct nvme_id_ctrl *id)
+ {
+ 	/** Controller Capabilities and Features ************************/
+ 	// PCI vendor ID
+@@ -82,10 +74,10 @@ void __nvme_mdev_adm_id_vctrl(struct nvme_mdev_vctrl *vctrl,
+ 	id->cctemp = 0x175;
+ 	// Maximum Time for Firmware Activation (dummy)
+ 	id->mtfa = 0;
+-	// Host Memory Buffer Preferred Size (dummy)
+-	id->hmpre = 0;
+-	// Host Memory Buffer Minimum Size (dummy)
+-	id->hmmin = 0;
++	// Host Memory Buffer Preferred Size
++	store_le32(&id->hmpre, vctrl->hmb_hmpre);
++	// Host Memory Buffer Minimum Size
++	store_le32(&id->hmmin, vctrl->hmb_hmmin);
+ 	// Total NVM Capacity (not supported)
+ 	id->tnvmcap[0] = 0;
+ 	// Unallocated NVM Capacity (not supported for now)
+@@ -120,7 +112,7 @@ void __nvme_mdev_adm_id_vctrl(struct nvme_mdev_vctrl *vctrl,
+ 	id->nn = MAX_VIRTUAL_NAMESPACES;
+ 	// Optional NVM Command Support
+ 	// (we add dsm and write zeros if host supports them)
+-	id->oncs = hctrl->oncs;
++	store_le16(&id->oncs, hctrl->oncs & vctrl->oncs_mask);
+ 	// TODOLATER: IO: Fused Operation Support
+ 	id->fuses = 0;
+ 	// Format NVM Attributes (don't support)
+@@ -146,8 +138,36 @@ void __nvme_mdev_adm_id_vctrl(struct nvme_mdev_vctrl *vctrl,
+ 	store_le32(&id->psd[0].exit_lat, 0x4);
+ }
+ 
+-void __nvme_mdev_adm_id_vns(struct nvme_mdev_vctrl *vctrl,
+-			    struct nvme_mdev_vns *ns, struct nvme_id_ns *idns)
++void __nvme_mdev_adm_id_vctrl(struct nvme_mdev_vctrl *vctrl,
++			      struct nvme_mdev_hctrl *hctrl,
++			      struct nvme_id_ctrl *id)
++{
++	if (!vctrl->id) {
++		vctrl->id = kzalloc(sizeof(struct nvme_id_ctrl), GFP_KERNEL);
++		if (!vctrl->id)
++			// failsafe
++			return __nvme_mdev_adm_id_vctrl_init(vctrl, hctrl, id);
++		__nvme_mdev_adm_id_vctrl_init(vctrl, hctrl, vctrl->id);
++	}
++	memcpy(id, vctrl->id, sizeof(struct nvme_id_ctrl));
++}
++
++int __nvme_mdev_adm_set_id_vctrl(struct nvme_mdev_vctrl *vctrl,
++				 struct nvme_mdev_hctrl *hctrl,
++				 struct nvme_id_ctrl *id)
++{
++	if (!vctrl->id) {
++		vctrl->id = kzalloc(sizeof(struct nvme_id_ctrl), GFP_KERNEL);
++		if (!vctrl->id)
++			return -ENOMEM;
++	}
++	memcpy(vctrl->id, id, sizeof(struct nvme_id_ctrl));
++	return 0;
++}
++
++static void __nvme_mdev_adm_id_vns_init(struct nvme_mdev_vctrl *vctrl,
++					struct nvme_mdev_vns *ns,
++					struct nvme_id_ns *idns)
+ {
+ 	//Namespace Size
+ 	store_le64(&idns->nsze, ns->ns_size);
+@@ -202,10 +222,36 @@ void __nvme_mdev_adm_id_vns(struct nvme_mdev_vctrl *vctrl,
+ 	idns->lbaf[0].rp = 0;
+ }
+ 
++void __nvme_mdev_adm_id_vns(struct nvme_mdev_vctrl *vctrl,
++			    struct nvme_mdev_vns *ns, struct nvme_id_ns *idns)
++{
++	if (!ns->idns) {
++		ns->idns = kzalloc(sizeof(struct nvme_id_ns), GFP_KERNEL);
++		if (!ns->idns)
++			// failsafe
++			return __nvme_mdev_adm_id_vns_init(vctrl, ns, idns);
++		__nvme_mdev_adm_id_vns_init(vctrl, ns, ns->idns);
++	}
++	memcpy(idns, ns->idns, sizeof(struct nvme_id_ns));
++}
++
++int __nvme_mdev_adm_set_id_vns(struct nvme_mdev_vctrl *vctrl,
++			       struct nvme_mdev_vns *ns,
++			       struct nvme_id_ns *idns)
++{
++	if (!ns->idns) {
++		ns->idns = kzalloc(sizeof(struct nvme_id_ns), GFP_KERNEL);
++		if (!ns->idns)
++			return -ENOMEM;
++	}
++	memcpy(ns->idns, idns, sizeof(struct nvme_id_ns));
++	return 0;
++}
++
+ /*Identify Controller */
+ static int nvme_mdev_adm_handle_id_cntrl(struct adm_ctx *ctx)
+ {
+-	int ret;
++	int ret = 0;
+ 	const struct nvme_identify *in = &ctx->in->identify;
+ 	struct nvme_id_ctrl *id;
+ 
+@@ -216,9 +262,18 @@ static int nvme_mdev_adm_handle_id_cntrl(struct adm_ctx *ctx)
+ 	if (!id)
+ 		return NVME_SC_INTERNAL;
+ 
+-	__nvme_mdev_adm_id_vctrl(ctx->vctrl, ctx->hctrl, id);
++	if (ctx->vctrl->forward_identify)
++		ret = __nvme_mdev_notifyfd_send_wait(ctx->vctrl, 0, ctx->in,
++						     admin_timeout_ms);
++	if (!ctx->vctrl->forward_identify ||
++	    (ret &&
++	     ctx->vctrl->forward_identify == NVME_MDEV_ID_FWD_FAILSAFE)) {
++		__nvme_mdev_adm_id_vctrl(ctx->vctrl, ctx->hctrl, id);
++		ret = 0;
++	}
+ 
+-	ret = nvme_mdev_write_to_udata(&ctx->udatait, id, sizeof(*id));
++	if (!ret)
++		ret = nvme_mdev_write_to_udata(&ctx->udatait, id, sizeof(*id));
+ 	kfree(id);
+ 	return nvme_mdev_translate_error(ret);
+ }
+@@ -239,11 +294,22 @@ static int nvme_mdev_adm_handle_id_ns(struct adm_ctx *ctx)
+ 		return NVME_SC_INTERNAL;
+ 
+ 	if (ctx->ns) {
+-		__nvme_mdev_adm_id_vns(ctx->vctrl, ctx->ns, idns);
++		if (ctx->vctrl->forward_identify)
++			ret = __nvme_mdev_notifyfd_send_wait(
++				ctx->vctrl, 0, ctx->in, admin_timeout_ms);
++		if (!ctx->vctrl->forward_identify ||
++		    (ret && ctx->vctrl->forward_identify ==
++				    NVME_MDEV_ID_FWD_FAILSAFE)) {
++			__nvme_mdev_adm_id_vns(ctx->vctrl, ctx->ns, idns);
++			ret = 0;
++		}
++	} else {
++		ret = DNR(NVME_SC_INVALID_NS);
+ 	}
+ 
+-	ret = nvme_mdev_write_to_udata(&ctx->udatait, idns,
+-				       NVME_IDENTIFY_DATA_SIZE);
++	if (!ret)
++		ret = nvme_mdev_write_to_udata(&ctx->udatait, idns,
++					       NVME_IDENTIFY_DATA_SIZE);
+ 	kfree(idns);
+ 	return nvme_mdev_translate_error(ret);
+ }
+@@ -468,7 +534,7 @@ static int __nvme_mdev_adm_handle_create_cq(struct adm_ctx *ctx)
+ 		return DNR(NVME_SC_INVALID_FIELD);
+ 
+ 	/* QID checks*/
+-	if (!cqid || cqid >= MAX_VIRTUAL_QUEUES ||
++	if (!cqid || cqid >= vctrl->vq_count ||
+ 	    rcu_access_pointer(vctrl->vcqs[cqid]))
+ 		return DNR(NVME_SC_QID_INVALID);
+ 
+@@ -506,7 +572,7 @@ static int __nvme_mdev_adm_handle_delete_cq(struct adm_ctx *ctx)
+ 					   RSRV_MPTR | RSRV_DW11_15))
+ 		return DNR(NVME_SC_INVALID_FIELD);
+ 
+-	if (!qid || qid >= MAX_VIRTUAL_QUEUES)
++	if (!qid || qid >= vctrl->vq_count)
+ 		return DNR(NVME_SC_QID_INVALID);
+ 
+ 	vcq = rcu_dereference_protected(vctrl->vcqs[qid],
+@@ -514,7 +580,7 @@ static int __nvme_mdev_adm_handle_delete_cq(struct adm_ctx *ctx)
+ 	if (!vcq)
+ 		return DNR(NVME_SC_QID_INVALID);
+ 
+-	for (sqid = 0; sqid < MAX_VIRTUAL_QUEUES; sqid++) {
++	for (sqid = 0; sqid < vctrl->vq_count; sqid++) {
+ 		struct nvme_vsq *vsq = rcu_dereference_protected(
+ 			vctrl->vsqs[sqid], lockdep_is_held(&vctrl->lock));
+ 		if (vsq && vsq->vcq == vcq)
+@@ -542,11 +608,11 @@ static int __nvme_mdev_adm_handle_create_sq(struct adm_ctx *ctx)
+ 					   RSRV_MPTR | RSRV_DW12_15))
+ 		return DNR(NVME_SC_INVALID_FIELD);
+ 
+-	if (!sqid || sqid >= MAX_VIRTUAL_QUEUES ||
++	if (!sqid || sqid >= vctrl->vq_count ||
+ 	    rcu_access_pointer(vctrl->vsqs[sqid]))
+ 		return DNR(NVME_SC_QID_INVALID);
+ 
+-	if (!cqid || cqid >= MAX_VIRTUAL_QUEUES)
++	if (!cqid || cqid >= vctrl->vq_count)
+ 		return DNR(NVME_SC_QID_INVALID);
+ 
+ 	if (!rcu_access_pointer(vctrl->vcqs[cqid]))
+@@ -583,7 +649,7 @@ static int __nvme_mdev_adm_handle_delete_sq(struct adm_ctx *ctx)
+ 					   RSRV_MPTR | RSRV_DW11_15))
+ 		return DNR(NVME_SC_INVALID_FIELD);
+ 
+-	if (!qid || qid >= MAX_VIRTUAL_QUEUES ||
++	if (!qid || qid >= vctrl->vq_count ||
+ 	    !rcu_access_pointer(vctrl->vsqs[qid]))
+ 		return DNR(NVME_SC_QID_INVALID);
+ 
+@@ -654,8 +720,7 @@ static int __nvme_mdev_adm_handle_get_features(struct adm_ctx *ctx)
+ 	switch (fid) {
+ 	/* Number of queues */
+ 	case NVME_FEAT_NUM_QUEUES:
+-		value = (MAX_VIRTUAL_QUEUES - 1) |
+-			((MAX_VIRTUAL_QUEUES - 1) << 16);
++		value = (vctrl->vq_count - 1) | ((vctrl->vq_count - 1) << 16);
+ 		goto out;
+ 
+ 	/* Arbitration */
+@@ -737,8 +802,7 @@ static int __nvme_mdev_adm_handle_set_features(struct adm_ctx *ctx)
+ 	switch (fid) {
+ 	case NVME_FEAT_NUM_QUEUES:
+ 		/* need to return the value here as well */
+-		value = (MAX_VIRTUAL_QUEUES - 1) |
+-			((MAX_VIRTUAL_QUEUES - 1) << 16);
++		value = (vctrl->vq_count - 1) | ((vctrl->vq_count - 1) << 16);
+ 
+ 		__nvme_mdev_vsq_cmd_done_adm(ctx->vctrl, value, cid,
+ 					     NVME_SC_SUCCESS);
+@@ -765,11 +829,11 @@ static int __nvme_mdev_adm_handle_set_features(struct adm_ctx *ctx)
+ 	}
+ 	case NVME_FEAT_VOLATILE_WC:
+ 		return (value != 0x1) ? DNR(NVME_SC_FEATURE_NOT_CHANGEABLE) :
+-					      NVME_SC_SUCCESS;
++					NVME_SC_SUCCESS;
+ 
+ 	case NVME_FEAT_ERR_RECOVERY:
+ 		return (value != 0) ? DNR(NVME_SC_FEATURE_NOT_CHANGEABLE) :
+-					    NVME_SC_SUCCESS;
++				      NVME_SC_SUCCESS;
+ 	case NVME_FEAT_POWER_MGMT:
+ 		if (value & 0xFFFFFF0F)
+ 			return DNR(NVME_SC_INVALID_FIELD);
+@@ -782,6 +846,12 @@ static int __nvme_mdev_adm_handle_set_features(struct adm_ctx *ctx)
+ 	case NVME_FEAT_ASYNC_EVENT:
+ 		__nvme_mdev_event_set_aen_config(vctrl, value);
+ 		return NVME_SC_SUCCESS;
++
++	case NVME_FEAT_HOST_MEM_BUF:
++		if (!vctrl->hmb_hmpre)
++			return DNR(NVME_SC_INVALID_FIELD);
++		return __nvme_mdev_notifyfd_send_wait(ctx->vctrl, 0, ctx->in,
++						      admin_timeout_ms);
+ 	default:
+ 		return DNR(NVME_SC_INVALID_FIELD);
+ 	}
+@@ -811,6 +881,14 @@ static int __nvme_mdev_adm_handle_abort(struct adm_ctx *ctx)
+ 	return DNR(NVME_SC_ABORT_MISSING);
+ }
+ 
++static int __nvme_mdev_adm_handle_vendor(struct adm_ctx *ctx)
++{
++	if (!ctx->vctrl->allow_vendor_adm)
++		return DNR(NVME_SC_INVALID_OPCODE);
++	return __nvme_mdev_notifyfd_send_wait(ctx->vctrl, 0, ctx->in,
++					      admin_timeout_ms);
++}
++
+ /* Process one new command in the admin queue*/
+ static int __nvme_mdev_adm_handle_cmd(struct adm_ctx *ctx)
+ {
+@@ -852,6 +930,9 @@ static int __nvme_mdev_adm_handle_cmd(struct adm_ctx *ctx)
+ 	case nvme_admin_abort_cmd:
+ 		_DBG(ctx->vctrl, "ADMINQ: ABORT\n");
+ 		return __nvme_mdev_adm_handle_abort(ctx);
++	case nvme_admin_vendor_start ... 0xff:
++		_DBG(ctx->vctrl, "ADMINQ: VENDOR\n");
++		return __nvme_mdev_adm_handle_vendor(ctx);
+ 	default:
+ 		_DBG(ctx->vctrl, "ADMINQ: optcode 0x%04x\n", optcode);
+ 		return DNR(NVME_SC_INVALID_OPCODE);
+@@ -877,6 +958,7 @@ void __nvme_mdev_adm_process_sq(struct nvme_mdev_vctrl *vctrl)
+ 		struct nvme_vsq *adm_sq = rcu_dereference_protected(
+ 			vctrl->vsqs[0], lockdep_is_held(&vctrl->lock));
+ 		BUG_ON(!adm_sq);
++		ctx.adm_sq = adm_sq;
+ 
+ 		ctx.in = nvme_mdev_vsq_get_cmd(vctrl, adm_sq);
+ 		if (!ctx.in)
+diff --git a/drivers/nvme/mdev/bpf.c b/drivers/nvme/mdev/bpf.c
+index dd936f729a84..eba97f019f52 100644
+--- a/drivers/nvme/mdev/bpf.c
++++ b/drivers/nvme/mdev/bpf.c
+@@ -11,13 +11,11 @@ static bool is_valid_access(int off, int size, enum bpf_access_type type,
+ 		return false;
+ 
+ 	switch (off) {
+-	case offsetof(struct bpf_io_ctx, sqid):
+-	case offsetof(struct bpf_io_ctx, current_hook):
+-	case offsetof(struct bpf_io_ctx, iostate):
+-	case offsetof(struct bpf_io_ctx, data):
+-		return type == BPF_READ && size == sizeof(__u32);
+ 	case bpf_ctx_range(struct bpf_io_ctx, cmd):
+ 		return off + size <= offsetofend(struct bpf_io_ctx, cmd);
++	default:
++		return type == BPF_READ &&
++		       off + size <= sizeof(struct bpf_io_ctx);
+ 	}
+ 
+ 	return false;
+@@ -54,10 +52,51 @@ static u32 convert_ctx_access(enum bpf_access_type type,
+ }
+ */
+ 
++BPF_CALL_2(bpf_arraymap_elem_band, struct bpf_map *, map, void *, value)
++{
++	struct bpf_array *array = container_of(map, struct bpf_array, map);
++	u32 index;
++
++	if (map->map_type != BPF_MAP_TYPE_PERCPU_ARRAY)
++		return -EINVAL;
++
++	switch (map->value_size) {
++	case 4:
++		for (index = 0; index < array->map.max_entries; index++) {
++			u32 *oldval = this_cpu_ptr(array->pptrs[index]);
++			*oldval &= *(u32 *)value;
++		}
++		break;
++	case 8:
++		for (index = 0; index < array->map.max_entries; index++) {
++			u64 *oldval = this_cpu_ptr(array->pptrs[index]);
++			*oldval &= *(u64 *)value;
++		}
++		break;
++	default:
++		return -EINVAL;
++	}
++
++	return 0;
++}
++
++static const struct bpf_func_proto arraymap_elem_band_proto = {
++	.func = bpf_arraymap_elem_band,
++	.gpl_only = false,
++	.ret_type = RET_INTEGER,
++	.arg1_type = ARG_CONST_MAP_PTR,
++	.arg2_type = ARG_PTR_TO_MAP_VALUE,
++};
++
+ static const struct bpf_func_proto *get_func_proto(enum bpf_func_id func_id,
+ 						   const struct bpf_prog *prog)
+ {
+-	return bpf_base_func_proto(func_id);
++	switch (func_id) {
++	case BPF_FUNC_arraymap_elem_band:
++		return &arraymap_elem_band_proto;
++	default:
++		return bpf_base_func_proto(func_id);
++	}
+ }
+ 
+ const struct bpf_prog_ops nvme_mdev_prog_ops = {};
+diff --git a/drivers/nvme/mdev/bpf_sm.c b/drivers/nvme/mdev/bpf_sm.c
+index a2a2312f426a..caae3c17ab9b 100644
+--- a/drivers/nvme/mdev/bpf_sm.c
++++ b/drivers/nvme/mdev/bpf_sm.c
+@@ -12,7 +12,7 @@ bool nvme_mdev_bpfsm_get(struct nvme_vsq *vsq, u16 cid, int *ios)
+ }
+ 
+ bool nvme_mdev_bpfsm_runhook(struct bpf_io_ctx *ctx, struct nvme_vsq *vsq,
+-			     u16 ucid, int current_hook, u32 data)
++			     u16 ucid, int current_hook, u32 data, u32 *aux)
+ {
+ 	struct bpf_prog *prog;
+ 	u32 bpf_ret;
+@@ -23,6 +23,8 @@ bool nvme_mdev_bpfsm_runhook(struct bpf_io_ctx *ctx, struct nvme_vsq *vsq,
+ 	ctx->sqid = vsq->qid;
+ 	ctx->current_hook = current_hook;
+ 	ctx->data = data;
++	if (aux)
++		memcpy(&ctx->aux[0], aux, ARRAY_SIZE(ctx->aux) * sizeof(u32));
+ 
+ 	if (current_hook == NMBPF_HOOK_VSQ)
+ 		ctx->iostate = 0;
+diff --git a/drivers/nvme/mdev/bpf_sm.h b/drivers/nvme/mdev/bpf_sm.h
+index 59f1da5cfdfc..058a0c27f624 100644
+--- a/drivers/nvme/mdev/bpf_sm.h
++++ b/drivers/nvme/mdev/bpf_sm.h
+@@ -6,13 +6,32 @@
+ struct io_ctx;
+ struct nvme_vsq;
+ 
++/*
++ * Atomically read iostate of command `cid` into `ios`.
++ * Return true if there's a pending completion.
++ */
+ bool nvme_mdev_bpfsm_get(struct nvme_vsq *vsq, u16 cid, int *ios);
+ 
++/*
++ * Run BPF classifier of command `ucid` on hook `current_hook` (`NMBPF_HOOK_*`).
++ * Except for `NMBPF_HOOK_VSQ`, use saved command contents from `vsq->ctx_data`.
++ * Use the status and aux returns of previous path in `data` and `aux`.
++ * Return true if execution succeeded.
++ */
+ bool nvme_mdev_bpfsm_runhook(struct bpf_io_ctx *ctx, struct nvme_vsq *vsq,
+-			     u16 ucid, int current_hook, u32 data);
++			     u16 ucid, int current_hook, u32 data, u32 *aux);
+ 
++/*
++ * Update iostate of command `cid` with `bpf_ret` from classifier.
++ * Return the updated iostate.
++ */
+ int nvme_mdev_bpfsm_set(struct nvme_vsq *vsq, u16 cid, int bpf_ret);
+ 
++/*
++ * Update iostate of command `cid` with `status` from path type `cmpl_type`
++ * (`NMBPF_WILL_COMPLETE_*`).
++ * Return the updated iostate.
++ */
+ int nvme_mdev_bpfsm_update(struct nvme_vsq *vsq, u16 cid, u16 status,
+ 			   int cmpl_type);
+ 
+diff --git a/drivers/nvme/mdev/features.c b/drivers/nvme/mdev/features.c
+new file mode 100644
+index 000000000000..6084c10497f6
+--- /dev/null
++++ b/drivers/nvme/mdev/features.c
+@@ -0,0 +1,109 @@
++#include <linux/init.h>
++#include <linux/device.h>
++#include <linux/kernel.h>
++#include <linux/vfio.h>
++#include <linux/sysfs.h>
++#include <linux/mdev.h>
++#include <linux/nvme_mdev.h>
++#include "priv.h"
++
++static ssize_t hmb_hmpre_store(struct device *dev,
++			       struct device_attribute *attr, const char *buf,
++			       size_t count)
++{
++	unsigned int val;
++	ssize_t ret;
++	struct nvme_mdev_vctrl *vctrl = dev_to_vctrl(dev);
++
++	if (!vctrl)
++		return -ENODEV;
++	ret = kstrtouint(buf, 0, &val);
++	if (ret)
++		return ret;
++
++	mutex_lock(&vctrl->lock);
++	if (atomic_read(&vctrl->inuse)) {
++		ret = -EBUSY;
++	} else if (val < vctrl->hmb_hmmin) {
++		ret = -EINVAL;
++	} else {
++		vctrl->hmb_hmpre = val;
++		ret = count;
++	}
++	mutex_unlock(&vctrl->lock);
++
++	return count;
++}
++
++static ssize_t hmb_hmpre_show(struct device *dev, struct device_attribute *attr,
++			      char *buf)
++{
++	unsigned int val;
++	struct nvme_mdev_vctrl *vctrl = dev_to_vctrl(dev);
++
++	if (!vctrl)
++		return -ENODEV;
++
++	mutex_lock(&vctrl->lock);
++	val = vctrl->hmb_hmpre;
++	mutex_unlock(&vctrl->lock);
++
++	return sprintf(buf, "0x%x\n", val);
++}
++static DEVICE_ATTR_RW(hmb_hmpre);
++
++static ssize_t hmb_hmmin_store(struct device *dev,
++			       struct device_attribute *attr, const char *buf,
++			       size_t count)
++{
++	unsigned int val;
++	ssize_t ret;
++	struct nvme_mdev_vctrl *vctrl = dev_to_vctrl(dev);
++
++	if (!vctrl)
++		return -ENODEV;
++	ret = kstrtouint(buf, 0, &val);
++	if (ret)
++		return ret;
++
++	mutex_lock(&vctrl->lock);
++	if (atomic_read(&vctrl->inuse)) {
++		ret = -EBUSY;
++	} else if (val > vctrl->hmb_hmpre) {
++		ret = -EINVAL;
++	} else {
++		vctrl->hmb_hmmin = val;
++		ret = count;
++	}
++	mutex_unlock(&vctrl->lock);
++
++	return count;
++}
++
++static ssize_t hmb_hmmin_show(struct device *dev, struct device_attribute *attr,
++			      char *buf)
++{
++	unsigned int val;
++	struct nvme_mdev_vctrl *vctrl = dev_to_vctrl(dev);
++
++	if (!vctrl)
++		return -ENODEV;
++
++	mutex_lock(&vctrl->lock);
++	val = vctrl->hmb_hmmin;
++	mutex_unlock(&vctrl->lock);
++
++	return sprintf(buf, "0x%x\n", val);
++}
++static DEVICE_ATTR_RW(hmb_hmmin);
++
++static struct attribute *nvme_mdev_dev_features_atttributes[] = {
++	&dev_attr_hmb_hmpre.attr,
++	&dev_attr_hmb_hmmin.attr,
++	NULL,
++};
++
++const struct attribute_group nvme_mdev_feature_attr_group = {
++	.name = "features",
++	.attrs = nvme_mdev_dev_features_atttributes,
++};
+diff --git a/drivers/nvme/mdev/host.c b/drivers/nvme/mdev/host.c
+index 2e1b8dfa80a8..869b476d8091 100644
+--- a/drivers/nvme/mdev/host.c
++++ b/drivers/nvme/mdev/host.c
+@@ -16,11 +16,20 @@ LIST_HEAD(nvme_mdev_hctrl_list);
+ DEFINE_MUTEX(nvme_mdev_hctrl_list_mutex);
+ static struct nvme_mdev_inst_type **instance_types;
+ 
++unsigned int admin_timeout_ms = 5000;
++module_param_named(admin_timeout, admin_timeout_ms, uint, 0644);
++MODULE_PARM_DESC(admin_timeout,
++		 "Maximum admin command completion timeout (in msec)");
++
+ unsigned int io_timeout_ms = 30000;
+ module_param_named(io_timeout, io_timeout_ms, uint, 0644);
+ MODULE_PARM_DESC(io_timeout,
+ 		 "Maximum I/O command completion timeout (in msec)");
+ 
++unsigned int nsq_timeout_ms = 5000;
++module_param_named(nsq_timeout, nsq_timeout_ms, uint, 0644);
++MODULE_PARM_DESC(nsq_timeout, "Maximum notify SQ send timeout (in msec)");
++
+ unsigned int poll_timeout_ms = 500;
+ module_param_named(poll_timeout, poll_timeout_ms, uint, 0644);
+ MODULE_PARM_DESC(
+@@ -38,18 +47,6 @@ module_param(use_shadow_doorbell, bool, 0644);
+ MODULE_PARM_DESC(use_shadow_doorbell,
+ 		 "Enable the shadow doorbell NVMe extension");
+ 
+-#ifndef CONFIG_NMBPF_POLL_ONCE
+-unsigned int vsq_poll_loops = 1;
+-module_param(vsq_poll_loops, uint, 0644);
+-MODULE_PARM_DESC(vsq_poll_loops, "Number of VSQ poll iterations");
+-#endif
+-
+-#ifndef CONFIG_NVME_MDEV_VFIO_GENERIC_IO
+-unsigned int oncs_mask = NVME_CTRL_ONCS_DSM | NVME_CTRL_ONCS_WRITE_ZEROES;
+-module_param_named(oncs_mask, oncs_mask, uint, 0644);
+-MODULE_PARM_DESC(oncs_mask, "ONCS mask to apply to vctrl");
+-#endif
+-
+ /* Create a new host controller */
+ static struct nvme_mdev_hctrl *nvme_mdev_hctrl_create(struct nvme_ctrl *ctrl)
+ {
+@@ -74,7 +71,7 @@ static struct nvme_mdev_hctrl *nvme_mdev_hctrl_create(struct nvme_ctrl *ctrl)
+ 		return NULL;
+ 	}
+ 
+-	hctrl->oncs = ctrl->oncs & oncs_mask;
++	hctrl->oncs = ctrl->oncs;
+ #else
+ 	/* for now don't deal with bio chaining */
+ 	max_lba_transfer = BIO_MAX_PAGES;
+diff --git a/drivers/nvme/mdev/instance.c b/drivers/nvme/mdev/instance.c
+index e3de3f33eb72..4d4427d4af38 100644
+--- a/drivers/nvme/mdev/instance.c
++++ b/drivers/nvme/mdev/instance.c
+@@ -555,12 +555,19 @@ static int nvme_mdev_ioctl_open_notifyfd(struct nvme_mdev_vctrl *vctrl,
+ 	struct nmntfy_open_arg karg;
+ 	if (copy_from_user(&karg, arg, sizeof(karg)))
+ 		return -EFAULT;
+-	if (!karg.sqid || karg.sqid >= MAX_VIRTUAL_QUEUES)
+-		return -EINVAL;
+ 	return nvme_mdev_notifyfd_open(vctrl, karg.sqid);
+ }
+ #endif /* CONFIG_NVME_MDEV_BPF */
+ 
++static unsigned int nvme_mdev_vctrl_get_vq_count(struct nvme_mdev_vctrl *vctrl)
++{
++	unsigned int ret;
++	mutex_lock(&vctrl->lock);
++	ret = vctrl->vq_count;
++	mutex_unlock(&vctrl->lock);
++	return ret;
++}
++
+ /* ioctl() implementation */
+ static long nvme_mdev_ops_ioctl(struct mdev_device *mdev, unsigned int cmd,
+ 				unsigned long arg)
+@@ -590,6 +597,8 @@ static long nvme_mdev_ops_ioctl(struct mdev_device *mdev, unsigned int cmd,
+ 	case NVME_MDEV_OPEN_FD:
+ 		return nvme_mdev_ioctl_open_notifyfd(
+ 			vctrl, (struct nmntfy_open_arg __user *)arg);
++	case NVME_MDEV_GET_VQ_COUNT:
++		return nvme_mdev_vctrl_get_vq_count(vctrl);
+ #endif
+ 	default:
+ 		return -ENOTTY;
+@@ -725,97 +734,11 @@ static ssize_t namespaces_show(struct device *dev,
+ }
+ static DEVICE_ATTR_RO(namespaces);
+ 
+-static ssize_t iothread_idx_store(struct device *dev,
+-				  struct device_attribute *attr,
+-				  const char *buf, size_t count)
+-{
+-	unsigned long val;
+-	int ret;
+-	struct nvme_mdev_vctrl *vctrl = dev_to_vctrl(dev);
+-	bool old_enabled = false;
+-
+-	if (!vctrl)
+-		return -ENODEV;
+-	ret = kstrtoul(buf, 10, &val);
+-	if (ret)
+-		return ret;
+-	if (val >= num_iothreads)
+-		return -EINVAL;
+-
+-	mutex_lock(&vctrl->lock);
+-	if (vctrl->binding && READ_ONCE(vctrl->binding->poll_enabled))
+-		old_enabled = true;
+-	mutex_unlock(&vctrl->lock);
+-	nvme_mdev_io_unbind_all(vctrl);
+-	ret = nvme_mdev_io_bind(vctrl, &iothreads[val], old_enabled);
+-	if (ret)
+-		return ret;
+-
+-	return count;
+-}
+-
+-static ssize_t iothread_idx_show(struct device *dev,
+-				 struct device_attribute *attr, char *buf)
+-{
+-	struct nvme_mdev_vctrl *vctrl = dev_to_vctrl(dev);
+-	unsigned int ret = MAX_IOTHREADS, i;
+-
+-	if (!vctrl)
+-		return -ENODEV;
+-
+-	mutex_lock(&vctrl->lock);
+-	for (i = 0; i < num_iothreads; i++)
+-		if (vctrl->binding->it == &iothreads[i])
+-			ret = i;
+-	mutex_unlock(&vctrl->lock);
+-
+-	if (ret < MAX_IOTHREADS)
+-		return sprintf(buf, "%u\n", ret);
+-	else
+-		return -ENODEV;
+-}
+-static DEVICE_ATTR_RW(iothread_idx);
+-
+-/* change the cpu binding of the IO threads*/
+-static ssize_t shadow_doorbell_store(struct device *dev,
+-				     struct device_attribute *attr,
+-				     const char *buf, size_t count)
+-{
+-	bool val;
+-	int ret;
+-	struct nvme_mdev_vctrl *vctrl = dev_to_vctrl(dev);
+-
+-	if (!vctrl)
+-		return -ENODEV;
+-	ret = kstrtobool(buf, &val);
+-	if (ret)
+-		return ret;
+-	ret = nvme_mdev_vctrl_set_shadow_doorbell_supported(vctrl, val);
+-	if (ret)
+-		return ret;
+-	return count;
+-}
+-
+-/* change the cpu binding of the IO threads*/
+-static ssize_t shadow_doorbell_show(struct device *dev,
+-				    struct device_attribute *attr, char *buf)
+-{
+-	struct nvme_mdev_vctrl *vctrl = dev_to_vctrl(dev);
+-
+-	if (!vctrl)
+-		return -ENODEV;
+-
+-	return sprintf(buf, "%d\n", vctrl->mmio.shadow_db_supported ? 1 : 0);
+-}
+-static DEVICE_ATTR_RW(shadow_doorbell);
+-
+ static struct attribute *nvme_mdev_dev_ns_atttributes[] = {
+-	&dev_attr_add_namespace.attr, &dev_attr_remove_namespace.attr,
+-	&dev_attr_namespaces.attr, NULL
+-};
+-
+-static struct attribute *nvme_mdev_dev_settings_atttributes[] = {
+-	&dev_attr_iothread_idx.attr, &dev_attr_shadow_doorbell.attr, NULL
++	&dev_attr_add_namespace.attr,
++	&dev_attr_remove_namespace.attr,
++	&dev_attr_namespaces.attr,
++	NULL,
+ };
+ 
+ /* show perf stats */
+@@ -859,8 +782,32 @@ static ssize_t stats_store(struct device *dev, struct device_attribute *attr,
+ 
+ static DEVICE_ATTR_RW(stats);
+ 
++static ssize_t nq_stats_store(struct device *dev, struct device_attribute *attr,
++			      const char *buf, size_t count)
++{
++	int ret, i;
++	struct nvme_mdev_vctrl *vctrl = dev_to_vctrl(dev);
++	struct nvme_mdev_notifier *notifier;
++
++	if (!vctrl)
++		return -ENODEV;
++
++	rcu_read_lock();
++	for (i = 0; i < MAX_VIRTUAL_QUEUES; i++) {
++		notifier = rcu_dereference(vctrl->notifier[i]);
++		if (notifier)
++			_INFO(vctrl, "inflight: %d",
++			      atomic_read(&notifier->inflight));
++	}
++	rcu_read_unlock();
++
++	return count;
++}
++
++static DEVICE_ATTR_WO(nq_stats);
++
+ static struct attribute *nvme_mdev_dev_debug_attributes[] = {
+-	&dev_attr_stats.attr, NULL
++	&dev_attr_stats.attr, &dev_attr_nq_stats.attr, NULL
+ };
+ 
+ static const struct attribute_group nvme_mdev_ns_attr_group = {
+@@ -868,11 +815,6 @@ static const struct attribute_group nvme_mdev_ns_attr_group = {
+ 	.attrs = nvme_mdev_dev_ns_atttributes,
+ };
+ 
+-static const struct attribute_group nvme_mdev_setting_attr_group = {
+-	.name = "settings",
+-	.attrs = nvme_mdev_dev_settings_atttributes,
+-};
+-
+ static const struct attribute_group nvme_mdev_debug_attr_group = {
+ 	.name = "debug",
+ 	.attrs = nvme_mdev_dev_debug_attributes,
+@@ -881,6 +823,7 @@ static const struct attribute_group nvme_mdev_debug_attr_group = {
+ static const struct attribute_group *nvme_mdev_dev_attributte_groups[] = {
+ 	&nvme_mdev_ns_attr_group,
+ 	&nvme_mdev_setting_attr_group,
++	&nvme_mdev_feature_attr_group,
+ 	&nvme_mdev_debug_attr_group,
+ 	NULL,
+ };
+diff --git a/drivers/nvme/mdev/io.c b/drivers/nvme/mdev/io.c
+index d53a2eeb8b41..e10ee55b04cd 100644
+--- a/drivers/nvme/mdev/io.c
++++ b/drivers/nvme/mdev/io.c
+@@ -202,6 +202,13 @@ static int nvme_mdev_io_translate_dsm(struct io_ctx *ctx)
+ 	return nvme_mdev_translate_error(ret);
+ }
+ 
++static int nvme_mdev_io_translate_vendor(struct io_ctx *ctx)
++{
++	if (!READ_ONCE(ctx->vctrl->allow_vendor_io))
++		return DNR(NVME_SC_INVALID_OPCODE);
++	return -1;
++}
++
+ /* Process one new command in the io queue*/
+ static int nvme_mdev_io_translate_cmd(struct io_ctx *ctx)
+ {
+@@ -238,6 +245,8 @@ static int nvme_mdev_io_translate_cmd(struct io_ctx *ctx)
+ 		return nvme_mdev_io_translate_write_zeros(ctx);
+ 	case nvme_cmd_dsm:
+ 		return nvme_mdev_io_translate_dsm(ctx);
++	case 0x80 ... 0xff:
++		return nvme_mdev_io_translate_vendor(ctx);
+ 	default:
+ 		return DNR(NVME_SC_INVALID_OPCODE);
+ 	}
+@@ -284,30 +293,38 @@ int nvme_mdev_io_act(struct io_ctx *ctx, struct nvme_vsq *vsq, u16 ucid,
+ 	ctx->in = &ctx->bctx.cmd;
+ 
+ 	if (needs_react) {
+-		if (ctx->bctx.iostate & NMBPF_SEND_HQ) {
++		if (ctx->bctx.iostate & NMBPF_SEND_FD) {
++			ret = nvme_mdev_notifyfd_send_sync_timeout(
++				vsq->vctrl, vsq->qid, ctx->in, nsq_timeout_ms);
++			if (ret != -1) {
++				_INFO(ctx->vctrl,
++				      "IOQ: QID %d CID %d FAILED: nsq timeout\n",
++				      vsq->qid, ucid);
++				ctx->bctx.iostate = nvme_mdev_bpfsm_update(
++					vsq, ucid, ret, NMBPF_WILL_COMPLETE_FD);
++			}
++		}
++
++		if (ret == -1 && (ctx->bctx.iostate & NMBPF_SEND_HQ)) {
+ 			ret = nvme_mdev_io_passthrough(ctx, vsq, vsq->qid, ucid,
+ 						       tag);
+ 			if (ret != -1)
+ 				ctx->bctx.iostate = nvme_mdev_bpfsm_update(
+ 					vsq, ucid, ret, NMBPF_WILL_COMPLETE_HQ);
+ 		}
+-
+-		if ((ctx->bctx.iostate & NMBPF_SEND_FD)) {
+-			while (!nvme_mdev_notifyfd_send(vsq, ctx->in))
+-				;
+-		}
+ 	}
+ 
+ 	next_cmpl = ctx->bctx.iostate & NMBPF_COMPLETION_MASK;
+ 	if (next_cmpl == NMBPF_COMPLETE) {
+ 		if (nvme_mdev_bpfsm_runhook(&ctx->bctx, vsq, ucid,
+-					    NMBPF_HOOK_PRE_VCQ, 0))
++					    NMBPF_HOOK_PRE_VCQ, 0, NULL))
+ 			return nvme_mdev_io_act(ctx, vsq, ucid, true);
+ 		else {
+ 			u16 status =
+ 				(u16)(ctx->bctx.iostate & NMBPF_STATUS_MASK);
+ 			nvme_mdev_vsq_cmd_done_io(ctx->vctrl, vsq, ucid,
+ 						  status);
++			ctx->vctrl->perf.cmds_complete++;
+ 		}
+ 	}
+ 
+@@ -352,7 +369,8 @@ static int nvme_mdev_io_process_sq(struct io_ctx *ctx, struct nvme_vsq *vsq)
+ 		      ucid, oldstate);
+ 	}
+ 
+-	if (!nvme_mdev_bpfsm_runhook(&ctx->bctx, vsq, ucid, NMBPF_HOOK_VSQ, 0))
++	if (!nvme_mdev_bpfsm_runhook(&ctx->bctx, vsq, ucid, NMBPF_HOOK_VSQ, 0,
++				     NULL))
+ 		ctx->bctx.iostate = nvme_mdev_bpfsm_set(
+ 			vsq, ucid, NMBPF_SEND_HQ | NMBPF_WILL_COMPLETE_HQ);
+ 
+@@ -409,13 +427,13 @@ static int nvme_mdev_io_process_hwq(struct io_ctx *ctx, u16 hwq)
+ 			continue;
+ 
+ 		if (status != 0)
+-			_DBG(ctx->vctrl,
+-			     "IOQ: QID %d CID %d FAILED: status 0x%x (host response)\n",
+-			     qid, cid, status);
++			_INFO(ctx->vctrl,
++			      "IOQ: QID %d CID %d FAILED: status 0x%x (host response)\n",
++			      qid, cid, status);
+ 
+ #ifdef CONFIG_NVME_MDEV_BPF
+-		needs_react = nvme_mdev_bpfsm_runhook(&ctx->bctx, vsq, cid,
+-						      NMBPF_HOOK_HCQ, status);
++		needs_react = nvme_mdev_bpfsm_runhook(
++			&ctx->bctx, vsq, cid, NMBPF_HOOK_HCQ, status, NULL);
+ 		if (!needs_react)
+ 			ctx->bctx.iostate = nvme_mdev_bpfsm_update(
+ 				vsq, cid, status, NMBPF_WILL_COMPLETE_HQ);
+@@ -428,7 +446,6 @@ static int nvme_mdev_io_process_hwq(struct io_ctx *ctx, u16 hwq)
+ 
+ 	if (n > 0) {
+ 		c2 = rdtsc();
+-		ctx->vctrl->perf.cmds_complete += n;
+ 		ctx->vctrl->perf.cycles_receive_from_hw += (c2 - c1);
+ 	}
+ 
+@@ -479,11 +496,12 @@ int nvme_mdev_io_polling_loop(struct io_ctx *ctx)
+ 
+ 	u16 i, cqid, sqid;
+ 	unsigned int iter;
++	unsigned int nloops = READ_ONCE(vctrl->vsq_poll_loops);
+ 
+ 	BUG_ON(!binding || binding->state != NVME_MDEV_BINDING_BEGUN);
+ 
+ 	/* main loop */
+-	for (iter = 0; iter < vsq_poll_loops; iter++) {
++	for (iter = 0; iter < nloops; iter++) {
+ 		if (!READ_ONCE(binding->poll_enabled))
+ 			return 0;
+ 
+@@ -499,7 +517,7 @@ int nvme_mdev_io_polling_loop(struct io_ctx *ctx)
+ 		}
+ 
+ 		/* process the submission queues*/
+-		for (sqid = 1; sqid < MAX_VIRTUAL_QUEUES; sqid++) {
++		for (sqid = 1; sqid < vctrl->vq_count; sqid++) {
+ 			struct nvme_vsq *vsq =
+ 				rcu_dereference(vctrl->vsqs[sqid]);
+ 			if (vsq)
+@@ -507,7 +525,7 @@ int nvme_mdev_io_polling_loop(struct io_ctx *ctx)
+ 		}
+ 
+ 		/* process the completions from the guest*/
+-		for (cqid = 1; cqid < MAX_VIRTUAL_QUEUES; cqid++) {
++		for (cqid = 1; cqid < vctrl->vq_count; cqid++) {
+ 			struct nvme_vcq *vcq =
+ 				rcu_dereference(vctrl->vcqs[cqid]);
+ 			if (vcq)
+@@ -515,13 +533,19 @@ int nvme_mdev_io_polling_loop(struct io_ctx *ctx)
+ 		}
+ 		rcu_read_unlock();
+ 
++		/*
++		 * vsq processing includes long busy loops (nsq sending)
++		 * refresh the current time here
++		 */
++		ctx->vctrl->now = ktime_get();
++
+ 		/* process the completions from the hardware*/
+ 		for (i = 0; i < binding->hsqcnt; i++)
+ 			if (nvme_mdev_io_process_hwq(ctx, binding->hsqs[i]) > 0)
+ 				binding->last_io_t = vctrl->now;
+ 
+ 		/* process the completions from the notifiers */
+-		for (i = 0; i < MAX_VIRTUAL_QUEUES; i++)
++		for (i = 1; i < vctrl->vq_count; i++)
+ 			if (nvme_mdev_notifyfd_process_ncq(ctx->vctrl, i) > 0)
+ 				binding->last_io_t = vctrl->now;
+ 
+@@ -548,11 +572,12 @@ int nvme_mdev_io_end_poll(struct io_ctx *ctx)
+ 	u16 i, cqid, sqid;
+ 	int ret = -EAGAIN;
+ 	unsigned int iter;
++	unsigned int nloops = READ_ONCE(vctrl->vsq_poll_loops);
+ 
+ 	BUG_ON(!binding || binding->state == NVME_MDEV_BINDING_ZERO);
+ 
+ 	/* Drain the host/notifier IO */
+-	for (iter = 0; iter < vsq_poll_loops; iter++) {
++	for (iter = 0; iter < nloops; iter++) {
+ 		bool pending_io = false;
+ 
+ 		vctrl->now = ktime_get();
+@@ -571,7 +596,7 @@ int nvme_mdev_io_end_poll(struct io_ctx *ctx)
+ 				binding->last_io_t = vctrl->now;
+ 		}
+ 
+-		for (i = 0; i < MAX_VIRTUAL_QUEUES; i++) {
++		for (i = 1; i < vctrl->vq_count; i++) {
+ 			int n = nvme_mdev_notifyfd_process_ncq(ctx->vctrl, i);
+ 
+ 			if (n != -1)
+@@ -594,7 +619,7 @@ int nvme_mdev_io_end_poll(struct io_ctx *ctx)
+ 		}
+ 	}
+ 
+-	if (ret == -EAGAIN && iter == vsq_poll_loops) {
++	if (ret == -EAGAIN && iter == nloops) {
+ 		binding->state = NVME_MDEV_BINDING_ENDING;
+ 		return ret;
+ 	} else {
+@@ -603,7 +628,7 @@ int nvme_mdev_io_end_poll(struct io_ctx *ctx)
+ 
+ 	/* Drain all the pending completion interrupts to the guest*/
+ 	rcu_read_lock();
+-	for (cqid = 1; cqid < MAX_VIRTUAL_QUEUES; cqid++) {
++	for (cqid = 1; cqid < vctrl->vq_count; cqid++) {
+ 		struct nvme_vcq *vcq = rcu_dereference(vctrl->vcqs[cqid]);
+ 		if (vcq && nvme_mdev_vcq_flush(vctrl, vcq))
+ 			binding->idle = false;
+@@ -619,7 +644,7 @@ int nvme_mdev_io_end_poll(struct io_ctx *ctx)
+ 		if (!mutex_trylock(&vctrl->lock))
+ 			return ret;
+ 
+-		for (sqid = 1; sqid < MAX_VIRTUAL_QUEUES; sqid++) {
++		for (sqid = 1; sqid < vctrl->vq_count; sqid++) {
+ 			struct nvme_vsq *vsq = rcu_dereference_protected(
+ 				vctrl->vsqs[sqid],
+ 				lockdep_is_held(&vctrl->lock));
+diff --git a/drivers/nvme/mdev/mmio.c b/drivers/nvme/mdev/mmio.c
+index 1e764e20acac..35cc836040bc 100644
+--- a/drivers/nvme/mdev/mmio.c
++++ b/drivers/nvme/mdev/mmio.c
+@@ -77,7 +77,7 @@ static void __nvme_mdev_mmio_db_write_sq(struct nvme_mdev_vctrl *vctrl, u32 qid,
+ 
+ 	lockdep_assert_held(&vctrl->lock);
+ 	/* check if the db belongs to a valid queue */
+-	if (qid >= MAX_VIRTUAL_QUEUES || !rcu_access_pointer(vctrl->vsqs[qid]))
++	if (qid >= vctrl->vq_count || !rcu_access_pointer(vctrl->vsqs[qid]))
+ 		goto err_db;
+ 
+ 	/* emulate the shadow doorbell functionality */
+@@ -108,7 +108,7 @@ static void __nvme_mdev_mmio_db_write_cq(struct nvme_mdev_vctrl *vctrl, u32 qid,
+ 
+ 	lockdep_assert_held(&vctrl->lock);
+ 	/* check if the db belongs to a valid queue */
+-	if (qid >= MAX_VIRTUAL_QUEUES || !rcu_access_pointer(vctrl->vcqs[qid]))
++	if (qid >= vctrl->vq_count || !rcu_access_pointer(vctrl->vcqs[qid]))
+ 		goto err_db;
+ 
+ 	/* emulate the shadow doorbell functionality */
+@@ -375,7 +375,7 @@ static int nvme_mdev_mmio_bar_access(struct nvme_mdev_vctrl *vctrl, u16 offset,
+ 			goto drop;
+ 
+ 		sq ? __nvme_mdev_mmio_db_write_sq(vctrl, qid, val) :
+-			   __nvme_mdev_mmio_db_write_cq(vctrl, qid, val);
++		     __nvme_mdev_mmio_db_write_cq(vctrl, qid, val);
+ 		break;
+ 	}
+ 	default:
+diff --git a/drivers/nvme/mdev/notifyfd.c b/drivers/nvme/mdev/notifyfd.c
+index 07c071ad75ee..cf897b69f7be 100644
+--- a/drivers/nvme/mdev/notifyfd.c
++++ b/drivers/nvme/mdev/notifyfd.c
+@@ -94,7 +94,8 @@ static __poll_t notifyfd_poll(struct file *filp, struct poll_table_struct *wait)
+ 		return 0;
+ }
+ 
+-static void notifyfd_runhook(struct nvme_vsq *vsq, u16 ucid, u16 ustatus)
++static void notifyfd_runhook(struct nvme_vsq *vsq, u16 ucid, u16 ustatus,
++			     u32 *aux)
+ {
+ 	struct io_ctx ctx = {
+ 		/* ctx->in should be set up by nvme_mdev_io_act */
+@@ -106,8 +107,8 @@ static void notifyfd_runhook(struct nvme_vsq *vsq, u16 ucid, u16 ustatus)
+ 	bool needs_react;
+ 	nvme_mdev_udata_iter_setup(&vsq->vctrl->viommu, &ctx.udatait);
+ 
+-	needs_react = nvme_mdev_bpfsm_runhook(&ctx.bctx, vsq, ucid,
+-					      NMBPF_HOOK_NFD_WRITE, ustatus);
++	needs_react = nvme_mdev_bpfsm_runhook(
++		&ctx.bctx, vsq, ucid, NMBPF_HOOK_NFD_WRITE, ustatus, aux);
+ 	if (!needs_react)
+ 		ctx.bctx.iostate = nvme_mdev_bpfsm_update(
+ 			vsq, ucid, ustatus, NMBPF_WILL_COMPLETE_FD);
+@@ -293,6 +294,62 @@ static int nvme_mdev_ioctl_id_vns(struct nvme_mdev_vctrl *vctrl,
+ 	return ret;
+ }
+ 
++static int nvme_mdev_ioctl_set_id_vctrl(struct nvme_mdev_vctrl *vctrl,
++					struct nvme_mdev_id_vctrl __user *arg)
++{
++	int ret = 0;
++	struct nvme_id_ctrl *id;
++
++	id = kzalloc(sizeof(struct nvme_id_ctrl), GFP_KERNEL);
++	if (!id)
++		return -ENOMEM;
++
++	if (copy_from_user(id, arg->data, sizeof(struct nvme_id_ctrl))) {
++		ret = -EFAULT;
++		goto err;
++	}
++
++	mutex_lock(&vctrl->lock);
++	ret = __nvme_mdev_adm_set_id_vctrl(vctrl, vctrl->hctrl, id);
++	mutex_unlock(&vctrl->lock);
++
++err:
++	kfree(id);
++	return ret;
++}
++
++static int nvme_mdev_ioctl_set_id_vns(struct nvme_mdev_vctrl *vctrl,
++				      struct nvme_mdev_id_vns __user *arg)
++{
++	int ret = 0;
++	struct nvme_id_ns *idns;
++	u32 nsid;
++
++	if (copy_from_user(&nsid, &arg->nsid, sizeof(u32)))
++		return -EFAULT;
++
++	if (nsid == 0xffffffff || nsid == 0 || nsid > MAX_VIRTUAL_NAMESPACES)
++		return -EINVAL;
++
++	idns = kzalloc(sizeof(struct nvme_id_ns), GFP_KERNEL);
++	if (!idns)
++		return -ENOMEM;
++
++	if (copy_from_user(idns, arg->data, sizeof(struct nvme_id_ns))) {
++		ret = -EFAULT;
++		goto err;
++	}
++
++	mutex_lock(&vctrl->lock);
++	ret = __nvme_mdev_adm_set_id_vns(vctrl, vctrl->namespaces[nsid - 1],
++					 idns);
++	mutex_unlock(&vctrl->lock);
++
++err:
++	kfree(idns);
++	return ret;
++}
++
+ static long notifyfd_ioctl(struct file *filp, unsigned int cmd,
+ 			   unsigned long arg)
+ {
+@@ -306,6 +363,12 @@ static long notifyfd_ioctl(struct file *filp, unsigned int cmd,
+ 	case NVME_MDEV_NOTIFYFD_ID_VNS:
+ 		return nvme_mdev_ioctl_id_vns(
+ 			vctrl, (struct nvme_mdev_id_vns __user *)arg);
++	case NVME_MDEV_NOTIFYFD_SET_ID_VCTRL:
++		return nvme_mdev_ioctl_set_id_vctrl(
++			vctrl, (struct nvme_mdev_id_vctrl __user *)arg);
++	case NVME_MDEV_NOTIFYFD_SET_ID_VNS:
++		return nvme_mdev_ioctl_set_id_vns(
++			vctrl, (struct nvme_mdev_id_vns __user *)arg);
+ 	default:
+ 		return -ENOTTY;
+ 	}
+@@ -321,19 +384,11 @@ static const struct file_operations notifyfd_fops = {
+ 	.llseek = no_llseek,
+ };
+ 
+-bool nvme_mdev_notifyfd_send(struct nvme_vsq *vsq,
+-			     const struct nvme_command *cmd)
++static int nvme_mdev_notifyfd_send(struct nvme_mdev_notifier *notifier,
++				   const struct nvme_command *cmd)
+ {
+-	struct nvme_mdev_notifier *notifier;
+ 	int head, tail;
+-	bool ret;
+-
+-	rcu_read_lock();
+-	notifier = rcu_dereference(vsq->vctrl->notifier[vsq->qid]);
+-	if (!notifier) {
+-		rcu_read_unlock();
+-		return false;
+-	}
++	int ret;
+ 
+ 	head = notifier->sqh;
+ 	tail = READ_ONCE(notifier->sqt) & (NMNTFY_SQD_COUNT - 1);
+@@ -342,12 +397,11 @@ bool nvme_mdev_notifyfd_send(struct nvme_vsq *vsq,
+ 		notifier->sqd[head] = *cmd;
+ 		smp_store_release(&notifier->sqh,
+ 				  (head + 1) & (NMNTFY_SQD_COUNT - 1));
+-		ret = true;
++		ret = -1;
+ 	} else {
+-		ret = false;
++		ret = NVME_SC_NS_NOT_READY;
+ 	}
+ 
+-	rcu_read_unlock();
+ 	return ret;
+ }
+ 
+@@ -356,7 +410,7 @@ int nvme_mdev_notifyfd_open(struct nvme_mdev_vctrl *vctrl, u16 sqid)
+ 	int ret;
+ 	struct nvme_mdev_notifier *notifier;
+ 
+-	if (!sqid || sqid >= MAX_VIRTUAL_QUEUES)
++	if (sqid >= vctrl->vq_count)
+ 		return -EINVAL;
+ 
+ 	notifier = vmalloc_user(sizeof(*notifier));
+@@ -416,7 +470,8 @@ int nvme_mdev_notifyfd_process_ncq(struct nvme_mdev_vctrl *vctrl, u16 sqid)
+ 	if (count >= 1) {
+ 		for (i = 0; i < count; i++) {
+ 			struct nmntfy_response *resp = &notifier->cqd[tail];
+-			notifyfd_runhook(vsq, resp->ucid, resp->status);
++			notifyfd_runhook(vsq, resp->ucid, resp->status,
++					 &resp->aux[0]);
+ 			tail = (tail + 1) & (NMNTFY_CQD_COUNT - 1);
+ 		}
+ 		smp_store_release(&notifier->cqt, tail);
+@@ -427,3 +482,86 @@ int nvme_mdev_notifyfd_process_ncq(struct nvme_mdev_vctrl *vctrl, u16 sqid)
+ 	rcu_read_unlock();
+ 	return (count == 0 && inflight == 0) ? -1 : count;
+ }
++
++int nvme_mdev_notifyfd_send_sync_timeout(struct nvme_mdev_vctrl *vctrl,
++					 u16 sqid,
++					 const struct nvme_command *cmd,
++					 unsigned int timeout_ms)
++{
++	int tries = 0;
++	int ret;
++
++	struct nvme_mdev_notifier *notifier = rcu_dereference_check(
++		vctrl->notifier[sqid], lockdep_is_held(&vctrl->lock));
++	if (!notifier)
++		return DNR(NVME_SC_NS_NOT_READY);
++
++	while (1) {
++		ret = nvme_mdev_notifyfd_send(notifier, cmd);
++		if (ret == -1)
++			break;
++		tries = (tries + 1) % 4096;
++		if (!tries && timeout(vctrl->now, ktime_get(), timeout_ms))
++			break;
++	}
++	return ret;
++}
++
++int __nvme_mdev_notifyfd_send_wait(struct nvme_mdev_vctrl *vctrl, u16 sqid,
++				   const struct nvme_command *cmd,
++				   unsigned int timeout_ms)
++{
++	struct nvme_mdev_notifier *notifier;
++	int head, tail;
++	bool success = false;
++	int status;
++	ktime_t begin;
++
++	begin = ktime_get();
++
++	notifier = rcu_dereference_protected(vctrl->notifier[sqid],
++					     lockdep_is_held(&vctrl->lock));
++	if (!notifier)
++		return DNR(NVME_SC_NS_NOT_READY);
++
++	while (1) {
++		status = nvme_mdev_notifyfd_send_sync_timeout(vctrl, sqid, cmd,
++							      0);
++		success = status == -1;
++		if (success || timeout(begin, ktime_get(), timeout_ms))
++			break;
++		else
++			cond_resched();
++	}
++
++	if (!success)
++		goto exit;
++
++	success = false;
++	while (1) {
++		head = smp_load_acquire(&notifier->cqh) &
++		       (NMNTFY_CQD_COUNT - 1);
++		tail = notifier->cqt;
++		if (CIRC_CNT(head, tail, NMNTFY_CQD_COUNT) >= 1) {
++			// only process one ncq entry at a time with expectation
++			// that adm_nsq max qd is 1
++			// iow: for each adm nsq, wait for it to finish
++			status = notifier->cqd[tail].status;
++			tail = (tail + 1) & (NMNTFY_CQD_COUNT - 1);
++			smp_store_release(&notifier->cqt, tail);
++			atomic_dec(&notifier->inflight);
++			success = true;
++		}
++
++		if (success || timeout(begin, ktime_get(), timeout_ms))
++			break;
++		else
++			cond_resched();
++	}
++
++exit:
++	if (success)
++		return status;
++	else
++		return NVME_SC_INTERNAL;
++}
+diff --git a/drivers/nvme/mdev/notifyfd.h b/drivers/nvme/mdev/notifyfd.h
+index 79fa52497163..aaf0e61106a7 100644
+--- a/drivers/nvme/mdev/notifyfd.h
++++ b/drivers/nvme/mdev/notifyfd.h
+@@ -36,9 +36,15 @@ struct nvme_mdev_notifier {
+ 
+ int nvme_mdev_notifyfd_open(struct nvme_mdev_vctrl *vctrl, u16 sqid);
+ 
+-bool nvme_mdev_notifyfd_send(struct nvme_vsq *vsq,
+-			     const struct nvme_command *cmd);
++int nvme_mdev_notifyfd_send_sync_timeout(struct nvme_mdev_vctrl *vctrl,
++					 u16 sqid,
++					 const struct nvme_command *cmd,
++					 unsigned int timeout_ms);
+ 
+ int nvme_mdev_notifyfd_process_ncq(struct nvme_mdev_vctrl *vctrl, u16 sqid);
+ 
++int __nvme_mdev_notifyfd_send_wait(struct nvme_mdev_vctrl *vctrl, u16 sqid,
++				   const struct nvme_command *cmd,
++				   unsigned int timeout_ms);
++
+ #endif /* _NVME_MDEV_NOTIFYFD_H */
+diff --git a/drivers/nvme/mdev/priv.h b/drivers/nvme/mdev/priv.h
+index d93a7c0b9408..64e5ea10a124 100644
+--- a/drivers/nvme/mdev/priv.h
++++ b/drivers/nvme/mdev/priv.h
+@@ -19,6 +19,7 @@
+ #include <linux/bpf.h>
+ #include <linux/filter.h>
+ #include <linux/wait.h>
++#include <linux/sysfs.h>
+ #include "../host/nvme.h"
+ #include "mdev.h"
+ 
+@@ -32,7 +33,7 @@ extern struct mutex nvme_mdev_hctrl_list_mutex;
+ 
+ #define NVME_MDEV_MKTAG(sqid, ucid) (((u32)(sqid) << 16) | ((u32)(ucid)))
+ #define NVME_MDEV_TAG_SQID(tag) ((tag) >> 16)
+-#define NVME_MDEV_TAG_UCID(tag) ((tag)&0xffff)
++#define NVME_MDEV_TAG_UCID(tag) ((tag) & 0xffff)
+ 
+ #define NVME_MDEV_NVME_VER NVME_VS(0x01, 0x03, 0x00)
+ #define NVME_MDEV_FIRMWARE_VERSION "1.0"
+@@ -59,14 +60,19 @@ extern struct mutex nvme_mdev_hctrl_list_mutex;
+ #define MAX_LOG_PAGES 16
+ 
+ extern bool use_shadow_doorbell;
++extern unsigned int admin_timeout_ms;
+ extern unsigned int io_timeout_ms;
++extern unsigned int nsq_timeout_ms;
+ extern unsigned int poll_timeout_ms;
+ extern unsigned int admin_poll_rate_ms;
+-#ifdef CONFIG_NMBPF_POLL_ONCE
+-static const unsigned int vsq_poll_loops = 1;
+-#else
+-extern unsigned int vsq_poll_loops;
+-#endif
++
++enum nvme_mdev_forward_identify_mode {
++	NVME_MDEV_ID_FWD_NONE,
++	NVME_MDEV_ID_FWD_SYNC,
++	NVME_MDEV_ID_FWD_FAILSAFE,
++	/**/
++	NVME_MDEV_ID_FWD_MAX,
++};
+ 
+ struct nvme_mdev_notifier;
+ struct nvme_mdev_vctrl_iothread_binding;
+@@ -125,6 +131,8 @@ struct nvme_mdev_vns {
+ 	/* host nvme namespace that we are attached to it*/
+ 	struct nvme_ns *host_ns;
+ 
++	struct nvme_id_ns *idns;
++
+ 	/* block device that corresponds to the partition of that namespace */
+ 	struct block_device *host_part;
+ 	fmode_t fmode;
+@@ -314,6 +322,8 @@ struct nvme_mdev_vctrl {
+ 	struct nvme_mdev_user_irqs irqs;
+ 	struct nvme_mdev_user_events events;
+ 
++	struct nvme_id_ctrl *id;
++
+ 	/* emulated namespaces */
+ 	struct nvme_mdev_vns *namespaces[MAX_VIRTUAL_NAMESPACES];
+ 	__le32 ns_log[MAX_VIRTUAL_NAMESPACES];
+@@ -344,6 +354,18 @@ struct nvme_mdev_vctrl {
+ 	unsigned int arb_burst;
+ 	u8 worload_hint;
+ 
++	/* more settings */
++	unsigned int vsq_poll_loops;
++	unsigned int oncs_mask;
++	unsigned int vq_count;
++	bool allow_vendor_adm;
++	bool allow_vendor_io;
++	enum nvme_mdev_forward_identify_mode forward_identify;
++
++	/* features */
++	unsigned int hmb_hmpre;
++	unsigned int hmb_hmmin;
++
+ 	/* Identification*/
+ 	char subnqn[256];
+ 	char serial[9];
+@@ -354,7 +376,6 @@ struct nvme_mdev_vctrl {
+ 
+ #ifdef CONFIG_NVME_MDEV_BPF
+ 	struct bpf_prog __rcu *prog;
+-	u32 nl_enabled;
+ 	struct nvme_mdev_notifier __rcu *notifier[MAX_VIRTUAL_QUEUES];
+ 	atomic_t notifier_cnt;
+ #endif
+@@ -487,6 +508,13 @@ void __nvme_mdev_adm_id_vctrl(struct nvme_mdev_vctrl *vctrl,
+ void __nvme_mdev_adm_id_vns(struct nvme_mdev_vctrl *vctrl,
+ 			    struct nvme_mdev_vns *ns, struct nvme_id_ns *idns);
+ 
++int __nvme_mdev_adm_set_id_vctrl(struct nvme_mdev_vctrl *vctrl,
++				 struct nvme_mdev_hctrl *hctrl,
++				 struct nvme_id_ctrl *id);
++int __nvme_mdev_adm_set_id_vns(struct nvme_mdev_vctrl *vctrl,
++			       struct nvme_mdev_vns *ns,
++			       struct nvme_id_ns *idns);
++
+ #ifdef CONFIG_NVME_MDEV_BPF
+ int nvme_mdev_vctrl_attach_prog(struct nvme_mdev_vctrl *vctrl,
+ 				struct bpf_prog *prog);
+@@ -699,7 +727,7 @@ void nvme_mdev_viommu_reset(struct nvme_mdev_viommu *viommu);
+ 
+ #define DNR(e) ((e) | NVME_SC_DNR)
+ 
+-#define PAGE_ADDRESS(address) ((address)&PAGE_MASK)
++#define PAGE_ADDRESS(address) ((address) & PAGE_MASK)
+ #define OFFSET_IN_PAGE(address) ((address) & ~(PAGE_MASK))
+ 
+ #define _DBG(vctrl, fmt, ...)                                                  \
+@@ -829,14 +857,33 @@ struct io_ctx {
+ 	struct nvme_ext_data_iter *kdatait;
+ };
+ 
++struct adm_ctx {
++	struct nvme_mdev_vctrl *vctrl;
++	struct nvme_mdev_hctrl *hctrl;
++	const struct nvme_command *in;
++	struct nvme_vsq *adm_sq;
++	struct nvme_mdev_vns *ns;
++	struct nvme_ext_data_iter udatait;
++	unsigned int datalen;
++};
++
+ void nvme_mdev_io_begin_poll(struct nvme_mdev_vctrl_iothread_binding *binding);
+ /* -EAGAIN means poll should still be running */
+ int nvme_mdev_io_polling_loop(struct io_ctx *ctx);
+ int nvme_mdev_io_end_poll(struct io_ctx *ctx);
+ 
+ #ifdef CONFIG_NVME_MDEV_BPF
++/*
++ * If after classifier execution (`needs_react=true`), send the request to a
++ * corresponding path selected by the resulting iostate.
++ * Afterwards, process command completion.
++ * Return -1 on success or a NVMe status code.
++ */
+ int nvme_mdev_io_act(struct io_ctx *ctx, struct nvme_vsq *vsq, u16 ucid,
+ 		     bool needs_react);
+ #endif
+ 
++extern const struct attribute_group nvme_mdev_setting_attr_group;
++extern const struct attribute_group nvme_mdev_feature_attr_group;
++
+ #endif // _MDEV_NVME_H
+diff --git a/drivers/nvme/mdev/settings.c b/drivers/nvme/mdev/settings.c
+new file mode 100644
+index 000000000000..b9ba500791d4
+--- /dev/null
++++ b/drivers/nvme/mdev/settings.c
+@@ -0,0 +1,400 @@
++#include <linux/init.h>
++#include <linux/device.h>
++#include <linux/kernel.h>
++#include <linux/vfio.h>
++#include <linux/sysfs.h>
++#include <linux/mdev.h>
++#include <linux/nvme_mdev.h>
++#include "priv.h"
++#include "iothreads.h"
++
++static ssize_t iothread_idx_store(struct device *dev,
++				  struct device_attribute *attr,
++				  const char *buf, size_t count)
++{
++	unsigned long val;
++	int ret;
++	struct nvme_mdev_vctrl *vctrl = dev_to_vctrl(dev);
++	bool old_enabled = false;
++
++	if (!vctrl)
++		return -ENODEV;
++	ret = kstrtoul(buf, 10, &val);
++	if (ret)
++		return ret;
++	if (val >= num_iothreads)
++		return -EINVAL;
++
++	mutex_lock(&vctrl->lock);
++	if (vctrl->binding && READ_ONCE(vctrl->binding->poll_enabled))
++		old_enabled = true;
++	mutex_unlock(&vctrl->lock);
++	nvme_mdev_io_unbind_all(vctrl);
++	ret = nvme_mdev_io_bind(vctrl, &iothreads[val], old_enabled);
++	if (ret)
++		return ret;
++
++	return count;
++}
++
++static ssize_t iothread_idx_show(struct device *dev,
++				 struct device_attribute *attr, char *buf)
++{
++	struct nvme_mdev_vctrl *vctrl = dev_to_vctrl(dev);
++	unsigned int ret = MAX_IOTHREADS, i;
++
++	if (!vctrl)
++		return -ENODEV;
++
++	mutex_lock(&vctrl->lock);
++	for (i = 0; i < num_iothreads; i++)
++		if (vctrl->binding->it == &iothreads[i])
++			ret = i;
++	mutex_unlock(&vctrl->lock);
++
++	if (ret < MAX_IOTHREADS)
++		return sprintf(buf, "%u\n", ret);
++	else
++		return -ENODEV;
++}
++static DEVICE_ATTR_RW(iothread_idx);
++
++/* change the cpu binding of the IO threads*/
++static ssize_t shadow_doorbell_store(struct device *dev,
++				     struct device_attribute *attr,
++				     const char *buf, size_t count)
++{
++	bool val;
++	int ret;
++	struct nvme_mdev_vctrl *vctrl = dev_to_vctrl(dev);
++
++	if (!vctrl)
++		return -ENODEV;
++	ret = kstrtobool(buf, &val);
++	if (ret)
++		return ret;
++	ret = nvme_mdev_vctrl_set_shadow_doorbell_supported(vctrl, val);
++	if (ret)
++		return ret;
++	return count;
++}
++
++/* change the cpu binding of the IO threads*/
++static ssize_t shadow_doorbell_show(struct device *dev,
++				    struct device_attribute *attr, char *buf)
++{
++	struct nvme_mdev_vctrl *vctrl = dev_to_vctrl(dev);
++
++	if (!vctrl)
++		return -ENODEV;
++
++	return sprintf(buf, "%d\n", vctrl->mmio.shadow_db_supported ? 1 : 0);
++}
++static DEVICE_ATTR_RW(shadow_doorbell);
++
++static ssize_t vctrl_mmio_cap_store(struct device *dev,
++				    struct device_attribute *attr,
++				    const char *buf, size_t count)
++{
++	u64 val;
++	int ret;
++	struct nvme_mdev_vctrl *vctrl = dev_to_vctrl(dev);
++
++	if (!vctrl)
++		return -ENODEV;
++	ret = kstrtoull(buf, 0, &val);
++	if (ret)
++		return ret;
++
++	mutex_lock(&vctrl->lock);
++	vctrl->mmio.cap = val;
++	mutex_unlock(&vctrl->lock);
++
++	return count;
++}
++
++static ssize_t vctrl_mmio_cap_show(struct device *dev,
++				   struct device_attribute *attr, char *buf)
++{
++	u64 val;
++	struct nvme_mdev_vctrl *vctrl = dev_to_vctrl(dev);
++
++	if (!vctrl)
++		return -ENODEV;
++
++	mutex_lock(&vctrl->lock);
++	val = vctrl->mmio.cap;
++	mutex_unlock(&vctrl->lock);
++
++	return sprintf(buf, "0x%llx\n", val);
++}
++static DEVICE_ATTR_RW(vctrl_mmio_cap);
++
++static ssize_t vsq_poll_loops_store(struct device *dev,
++				    struct device_attribute *attr,
++				    const char *buf, size_t count)
++{
++	unsigned int val;
++	int ret;
++	struct nvme_mdev_vctrl *vctrl = dev_to_vctrl(dev);
++
++	if (!vctrl)
++		return -ENODEV;
++	ret = kstrtouint(buf, 0, &val);
++	if (ret)
++		return ret;
++
++	mutex_lock(&vctrl->lock);
++	WRITE_ONCE(vctrl->vsq_poll_loops, val);
++	mutex_unlock(&vctrl->lock);
++
++	return count;
++}
++
++static ssize_t vsq_poll_loops_show(struct device *dev,
++				   struct device_attribute *attr, char *buf)
++{
++	unsigned int val;
++	struct nvme_mdev_vctrl *vctrl = dev_to_vctrl(dev);
++
++	if (!vctrl)
++		return -ENODEV;
++
++	mutex_lock(&vctrl->lock);
++	val = vctrl->vsq_poll_loops;
++	mutex_unlock(&vctrl->lock);
++
++	return sprintf(buf, "%u\n", val);
++}
++static DEVICE_ATTR_RW(vsq_poll_loops);
++
++static ssize_t oncs_mask_store(struct device *dev,
++			       struct device_attribute *attr, const char *buf,
++			       size_t count)
++{
++	unsigned int val;
++	ssize_t ret;
++	struct nvme_mdev_vctrl *vctrl = dev_to_vctrl(dev);
++
++	if (!vctrl)
++		return -ENODEV;
++	ret = kstrtouint(buf, 0, &val);
++	if (ret)
++		return ret;
++
++	mutex_lock(&vctrl->lock);
++	if (atomic_read(&vctrl->inuse)) {
++		ret = -EBUSY;
++	} else {
++		vctrl->oncs_mask = val;
++		ret = count;
++	}
++	mutex_unlock(&vctrl->lock);
++
++	return ret;
++}
++
++static ssize_t oncs_mask_show(struct device *dev, struct device_attribute *attr,
++			      char *buf)
++{
++	unsigned int val;
++	struct nvme_mdev_vctrl *vctrl = dev_to_vctrl(dev);
++
++	if (!vctrl)
++		return -ENODEV;
++
++	mutex_lock(&vctrl->lock);
++	val = vctrl->oncs_mask;
++	mutex_unlock(&vctrl->lock);
++
++	return sprintf(buf, "0x%x\n", val);
++}
++static DEVICE_ATTR_RW(oncs_mask);
++
++static ssize_t vq_count_store(struct device *dev, struct device_attribute *attr,
++			      const char *buf, size_t count)
++{
++	unsigned int val;
++	ssize_t ret;
++	struct nvme_mdev_vctrl *vctrl = dev_to_vctrl(dev);
++
++	if (!vctrl)
++		return -ENODEV;
++	ret = kstrtouint(buf, 0, &val);
++	if (ret)
++		return ret;
++
++	mutex_lock(&vctrl->lock);
++	if (atomic_read(&vctrl->inuse)) {
++		ret = -EBUSY;
++	} else if (val > MAX_VIRTUAL_QUEUES) {
++		ret = -ENOMEM;
++	} else {
++		vctrl->vq_count = val;
++		ret = count;
++	}
++	mutex_unlock(&vctrl->lock);
++
++	return count;
++}
++
++static ssize_t vq_count_show(struct device *dev, struct device_attribute *attr,
++			     char *buf)
++{
++	unsigned int val;
++	struct nvme_mdev_vctrl *vctrl = dev_to_vctrl(dev);
++
++	if (!vctrl)
++		return -ENODEV;
++
++	mutex_lock(&vctrl->lock);
++	val = vctrl->vq_count;
++	mutex_unlock(&vctrl->lock);
++
++	return sprintf(buf, "%u\n", val);
++}
++static DEVICE_ATTR_RW(vq_count);
++
++static ssize_t allow_vendor_adm_store(struct device *dev,
++				      struct device_attribute *attr,
++				      const char *buf, size_t count)
++{
++	bool val;
++	ssize_t ret;
++	struct nvme_mdev_vctrl *vctrl = dev_to_vctrl(dev);
++
++	if (!vctrl)
++		return -ENODEV;
++	ret = kstrtobool(buf, &val);
++	if (ret)
++		return ret;
++
++	mutex_lock(&vctrl->lock);
++	if (atomic_read(&vctrl->inuse)) {
++		ret = -EBUSY;
++	} else {
++		vctrl->allow_vendor_adm = val;
++		ret = count;
++	}
++	mutex_unlock(&vctrl->lock);
++
++	return count;
++}
++
++static ssize_t allow_vendor_adm_show(struct device *dev,
++				     struct device_attribute *attr, char *buf)
++{
++	bool val;
++	struct nvme_mdev_vctrl *vctrl = dev_to_vctrl(dev);
++
++	if (!vctrl)
++		return -ENODEV;
++
++	mutex_lock(&vctrl->lock);
++	val = vctrl->allow_vendor_adm;
++	mutex_unlock(&vctrl->lock);
++
++	return sprintf(buf, "%u\n", val);
++}
++static DEVICE_ATTR_RW(allow_vendor_adm);
++
++static ssize_t allow_vendor_io_store(struct device *dev,
++				     struct device_attribute *attr,
++				     const char *buf, size_t count)
++{
++	bool val;
++	ssize_t ret;
++	struct nvme_mdev_vctrl *vctrl = dev_to_vctrl(dev);
++
++	if (!vctrl)
++		return -ENODEV;
++	ret = kstrtobool(buf, &val);
++	if (ret)
++		return ret;
++
++	mutex_lock(&vctrl->lock);
++	if (atomic_read(&vctrl->inuse)) {
++		ret = -EBUSY;
++	} else {
++		WRITE_ONCE(vctrl->allow_vendor_io, val);
++		ret = count;
++	}
++	mutex_unlock(&vctrl->lock);
++
++	return count;
++}
++
++static ssize_t allow_vendor_io_show(struct device *dev,
++				    struct device_attribute *attr, char *buf)
++{
++	bool val;
++	struct nvme_mdev_vctrl *vctrl = dev_to_vctrl(dev);
++
++	if (!vctrl)
++		return -ENODEV;
++
++	mutex_lock(&vctrl->lock);
++	val = vctrl->allow_vendor_io;
++	mutex_unlock(&vctrl->lock);
++
++	return sprintf(buf, "%u\n", val);
++}
++static DEVICE_ATTR_RW(allow_vendor_io);
++
++static ssize_t forward_identify_store(struct device *dev,
++				      struct device_attribute *attr,
++				      const char *buf, size_t count)
++{
++	int val;
++	ssize_t ret;
++	struct nvme_mdev_vctrl *vctrl = dev_to_vctrl(dev);
++
++	if (!vctrl)
++		return -ENODEV;
++	ret = kstrtoint(buf, 0, &val);
++	if (ret)
++		return ret;
++
++	mutex_lock(&vctrl->lock);
++	if (atomic_read(&vctrl->inuse)) {
++		ret = -EBUSY;
++	} else if (val < NVME_MDEV_ID_FWD_NONE || val >= NVME_MDEV_ID_FWD_MAX) {
++		ret = -EINVAL;
++	} else {
++		vctrl->forward_identify = val;
++		ret = count;
++	}
++	mutex_unlock(&vctrl->lock);
++
++	return count;
++}
++
++static ssize_t forward_identify_show(struct device *dev,
++				     struct device_attribute *attr, char *buf)
++{
++	int val;
++	struct nvme_mdev_vctrl *vctrl = dev_to_vctrl(dev);
++
++	if (!vctrl)
++		return -ENODEV;
++
++	mutex_lock(&vctrl->lock);
++	val = vctrl->forward_identify;
++	mutex_unlock(&vctrl->lock);
++
++	return sprintf(buf, "%u\n", val);
++}
++static DEVICE_ATTR_RW(forward_identify);
++
++static struct attribute *nvme_mdev_dev_settings_atttributes[] = {
++	&dev_attr_iothread_idx.attr,	 &dev_attr_shadow_doorbell.attr,
++	&dev_attr_vctrl_mmio_cap.attr,	 &dev_attr_vsq_poll_loops.attr,
++	&dev_attr_oncs_mask.attr,	 &dev_attr_vq_count.attr,
++	&dev_attr_allow_vendor_adm.attr, &dev_attr_allow_vendor_io.attr,
++	&dev_attr_forward_identify.attr, NULL,
++};
++
++const struct attribute_group nvme_mdev_setting_attr_group = {
++	.name = "settings",
++	.attrs = nvme_mdev_dev_settings_atttributes,
++};
+diff --git a/drivers/nvme/mdev/vctrl.c b/drivers/nvme/mdev/vctrl.c
+index 4fc321de9c78..d4f116f8e7f0 100644
+--- a/drivers/nvme/mdev/vctrl.c
++++ b/drivers/nvme/mdev/vctrl.c
+@@ -4,6 +4,7 @@
+  * Copyright (c) 2019 - Maxim Levitsky
+  */
+ #include <linux/kernel.h>
++#include <linux/minmax.h>
+ #include <linux/device.h>
+ #include <linux/slab.h>
+ #include <linux/mdev.h>
+@@ -65,14 +66,14 @@ static void __nvme_mdev_vctrl_viommu_update(struct nvme_mdev_vctrl *vctrl)
+ 		return;
+ 
+ 	/* update mappings for submission and completion queues */
+-	for (qid = 0; qid < MAX_VIRTUAL_QUEUES; qid++) {
++	for (qid = 0; qid < vctrl->vq_count; qid++) {
+ 		struct nvme_vsq *vsq =
+ 			rcu_dereference_protected(vctrl->vsqs[qid], 1);
+ 		if (vsq)
+ 			__nvme_mdev_vsq_viommu_update(&vctrl->viommu, vsq);
+ 	}
+ 
+-	for (qid = 0; qid < MAX_VIRTUAL_QUEUES; qid++) {
++	for (qid = 0; qid < vctrl->vq_count; qid++) {
+ 		struct nvme_vcq *vcq =
+ 			rcu_dereference_protected(vctrl->vcqs[qid], 1);
+ 		if (vcq)
+@@ -157,6 +158,15 @@ struct nvme_mdev_vctrl *nvme_mdev_vctrl_create(struct mdev_device *mdev,
+ 	vctrl->max_host_hw_queues = max_host_queues;
+ 	vctrl->viommu.vctrl = vctrl;
+ 
++	vctrl->vsq_poll_loops = 1;
++	vctrl->oncs_mask = NVME_CTRL_ONCS_DSM | NVME_CTRL_ONCS_WRITE_ZEROES;
++	vctrl->vq_count = MAX_VIRTUAL_QUEUES;
++	vctrl->allow_vendor_adm = false;
++	vctrl->allow_vendor_io = false;
++	vctrl->forward_identify = NVME_MDEV_ID_FWD_NONE;
++
++	vctrl->hmb_hmpre = vctrl->hmb_hmmin = 0;
++
+ 	mutex_init(&vctrl->lock);
+ 	init_waitqueue_head(&vctrl->quiescent_wqh);
+ 	nvme_mdev_vctrl_init_id(vctrl);
+@@ -253,6 +263,9 @@ int nvme_mdev_vctrl_destroy(struct nvme_mdev_vctrl *vctrl)
+ 
+ 	nvme_mdev_hctrl_hqs_unreserve(vctrl->hctrl, vctrl->max_host_hw_queues);
+ 
++	kfree(vctrl->id);
++	vctrl->id = NULL;
++
+ 	nvme_mdev_pci_free(vctrl);
+ 	nvme_mdev_mmio_free(vctrl);
+ 
+@@ -435,14 +448,14 @@ void __nvme_mdev_vctrl_disable(struct nvme_mdev_vctrl *vctrl)
+ 	nvme_mdev_events_reset(vctrl);
+ 	nvme_mdev_vns_log_reset(vctrl);
+ 
+-	for (sqid = 1; sqid < MAX_VIRTUAL_QUEUES; sqid++) {
++	for (sqid = 1; sqid < vctrl->vq_count; sqid++) {
+ 		struct nvme_vsq *vsq = rcu_dereference_protected(
+ 			vctrl->vsqs[sqid], lockdep_is_held(&vctrl->lock));
+ 		if (vsq)
+ 			__nvme_mdev_vsq_delete(vctrl, sqid);
+ 	}
+ 
+-	for (cqid = 1; cqid < MAX_VIRTUAL_QUEUES; cqid++) {
++	for (cqid = 1; cqid < vctrl->vq_count; cqid++) {
+ 		struct nvme_vcq *vcq = rcu_dereference_protected(
+ 			vctrl->vcqs[cqid], lockdep_is_held(&vctrl->lock));
+ 		if (vcq)
+diff --git a/drivers/nvme/mdev/vns.c b/drivers/nvme/mdev/vns.c
+index 2a764c21122a..e969158c3c50 100644
+--- a/drivers/nvme/mdev/vns.c
++++ b/drivers/nvme/mdev/vns.c
+@@ -266,6 +266,9 @@ static int __nvme_mdev_vns_destroy(struct nvme_mdev_vctrl *vctrl, u32 user_nsid)
+ 	__nvme_mdev_vns_send_event(vctrl, user_nsid);
+ 	__nvme_mdev_io_pause(vctrl);
+ 
++	kfree(vns->idns);
++	vns->idns = NULL;
++
+ 	vctrl->namespaces[user_nsid - 1] = NULL;
+ 	blkdev_put(vns->host_part, vns->fmode);
+ 	nvme_put_ns(vns->host_ns);
+diff --git a/drivers/nvme/mdev/vsq.c b/drivers/nvme/mdev/vsq.c
+index adf981fc22ea..543dbf0c1e46 100644
+--- a/drivers/nvme/mdev/vsq.c
++++ b/drivers/nvme/mdev/vsq.c
+@@ -196,6 +196,9 @@ void nvme_mdev_vsq_cmd_done_io(struct nvme_mdev_vctrl *vctrl,
+ 	_INFO(vctrl, "IOQ: QID %d CID %d done with status %#x\n", q->qid, cid,
+ 	      status);
+ #endif
++	if (status != 0)
++		_INFO(vctrl, "IOQ: QID %d CID %d failed with status %#x\n",
++		      q->qid, cid, status);
+ 	nvme_mdev_vcq_write_io(vctrl, q->vcq, q->head, q->qid, cid, status);
+ }
+ 
+diff --git a/include/linux/bpf_nvme_mdev.h b/include/linux/bpf_nvme_mdev.h
+index 916795bf2b8f..16d2a3954966 100644
+--- a/include/linux/bpf_nvme_mdev.h
++++ b/include/linux/bpf_nvme_mdev.h
+@@ -6,7 +6,8 @@
+ 
+ #ifdef CONFIG_NVME_MDEV_BPF
+ 
+-/* request lifecycle:
++/*
++ * request lifecycle:
+  * - bpf registers list of hooks it's interested in
+  * - bpf is called at each registered hook
+  * - bpf can have one of the following outcomes:
+@@ -21,7 +22,8 @@
+  *   sends. Such request enters a grace period until the sync sends are complete.
+  */
+ 
+-/* hook order - a bpf program called on a request by a later hook
++/*
++ * hook order - a bpf program called on a request by a later hook
+  * cannot register for an earlier hook for that request:
+  * 1. vsq
+  * 2. hcq
+@@ -31,8 +33,9 @@
+  */
+ 
+ struct bpf_io_ctx {
+-	/* RW only during vsq hook; modifications during non-vsq hook lead to
+-	 * undefined behavior
++	/*
++	 * RW. Modifications are persisted during vsq hook;
++	 * modifications during non-vsq hook are reverted at next hook.
+ 	 */
+ 	struct nvme_command cmd;
+ 
+@@ -42,6 +45,7 @@ struct bpf_io_ctx {
+ 	/* snapshot of iostate for the cmpxchg loop */
+ 	__u32 iostate;
+ 	__u32 data;
++	__u32 aux[3];
+ };
+ 
+ #define NMBPF_STATUS_MASK 0xFFFF
+diff --git a/include/uapi/linux/bpf.h b/include/uapi/linux/bpf.h
+index 1037f7d8d736..8ea54114a76e 100644
+--- a/include/uapi/linux/bpf.h
++++ b/include/uapi/linux/bpf.h
+@@ -3743,6 +3743,12 @@ union bpf_attr {
+  * 	Return
+  * 		The helper returns **TC_ACT_REDIRECT** on success or
+  * 		**TC_ACT_SHOT** on error.
++ *
++ * long bpf_arraymap_elem_band(struct bpf_map *map, const void *value)
++ * 	Description
++ * 		Calculate binary AND of all map elements with the given value.
++ * 	Return
++ * 		0 on success, or a negative error in case of failure.
+  */
+ #define __BPF_FUNC_MAPPER(FN)		\
+ 	FN(unspec),			\
+@@ -3901,6 +3907,7 @@ union bpf_attr {
+ 	FN(per_cpu_ptr),		\
+ 	FN(this_cpu_ptr),		\
+ 	FN(redirect_peer),		\
++	FN(arraymap_elem_band),		\
+ 	/* */
+ 
+ /* integer value in 'imm' field of BPF_CALL instruction selects which helper
+diff --git a/include/uapi/linux/nvme_mdev.h b/include/uapi/linux/nvme_mdev.h
+index f4cd5277b249..1c0273ee2fc0 100644
+--- a/include/uapi/linux/nvme_mdev.h
++++ b/include/uapi/linux/nvme_mdev.h
+@@ -6,9 +6,13 @@
+ #define NVME_MDEV_ATTACH_BPF _IOW('N', 0x80, int)
+ #define NVME_MDEV_DETACH_BPF _IO('N', 0x81)
+ #define NVME_MDEV_OPEN_FD _IOW('N', 0x82, struct nmntfy_open_arg)
++#define NVME_MDEV_GET_VQ_COUNT _IO('N', 0x83)
+ 
+ #define NVME_MDEV_NOTIFYFD_ID_VCTRL _IOR('N', 0x90, struct nvme_mdev_id_vctrl)
+ #define NVME_MDEV_NOTIFYFD_ID_VNS _IOR('N', 0x91, struct nvme_mdev_id_vns)
++#define NVME_MDEV_NOTIFYFD_SET_ID_VCTRL                                        \
++	_IOR('N', 0x92, struct nvme_mdev_id_vctrl)
++#define NVME_MDEV_NOTIFYFD_SET_ID_VNS _IOR('N', 0x93, struct nvme_mdev_id_vns)
+ 
+ #define NMNTFY_SQ_DATA_OFFSET 0
+ #define NMNTFY_SQ_DATA_NR_PAGES 8
+@@ -34,6 +38,7 @@ struct nvme_mdev_id_vns {
+ struct nmntfy_response {
+ 	__u16 ucid;
+ 	__u16 status;
++	__u32 aux[3];
+ };
+ 
+ struct nmntfy_open_arg {
+diff --git a/samples/bpf/Makefile b/samples/bpf/Makefile
+index 2d28db343faa..5ce3d0f9814f 100644
+--- a/samples/bpf/Makefile
++++ b/samples/bpf/Makefile
+@@ -179,6 +179,8 @@ always-y += nmbpf_encrypt_kern.o
+ always-y += nmbpf_encrypt_ip_kern.o
+ always-y += nmbpf_passthrough.o
+ always-y += nmbpf_replicate.o
++always-y += nmbpf_xcow.o
++always-y += nmbpf_xcownc.o
+ 
+ ifeq ($(ARCH), arm)
+ # Strip all except -D__LINUX_ARM_ARCH__ option needed to handle linux
+diff --git a/samples/bpf/nmbpf_xcow.c b/samples/bpf/nmbpf_xcow.c
+new file mode 100644
+index 000000000000..bcf06f0a3bfc
+--- /dev/null
++++ b/samples/bpf/nmbpf_xcow.c
+@@ -0,0 +1,263 @@
++#include <linux/bpf.h>
++#include <linux/nvme.h>
++#include <linux/bpf_nvme_mdev.h>
++#include <bpf/bpf_helpers.h>
++
++#define CLUSTER_SIZE 65536
++#define LBA_SIZE 512
++#define CLUSTER_LBAS (CLUSTER_SIZE / LBA_SIZE)
++
++#define XCACHE_ASSOC 4
++#define XCACHE_LINES 65536
++#define XCACHE_SIZE (XCACHE_ASSOC * XCACHE_LINES)
++
++enum AuxBits {
++	AUXBITS_VALID = 0x1,
++	AUXBITS_WRITABLE = 0x2,
++};
++enum AuxCommand {
++	AUXCMD_KEEP = 0x40000000,
++	AUXCMD_FORWARD = 0x20000000,
++};
++#define AUX_CMD_MASK 0x70000000
++#define AUX_MASK 0x3
++// reserve 1 bit in the aux shift
++// this way we have 3 aux bits per assoc and up to 8-way assoc
++#define AUX_SHIFT 3
++#define AUX_MAX_ASSOC 8
++
++#define META_MRU 0x1000000
++#define META_MRU_SHIFT 24
++#define META_MRU_MASK (((1 << XCACHE_ASSOC) - 1) << META_MRU_SHIFT)
++
++#define AUX_IS_VALID(meta, i) ((meta) & (AUXBITS_VALID << ((i) * AUX_SHIFT)))
++#define AUX_IS_WRITABLE(meta, i)                                               \
++	((meta) & (AUXBITS_WRITABLE << ((i) * AUX_SHIFT)))
++#define AUX_GET(meta, i) (((meta) >> ((i) * AUX_SHIFT)) & AUX_MASK)
++
++/*
++ * address structure (example with 8192 lines):
++ * (msb) tag--------------------------  idx----------  off----      (lsb)
++ * ttttttttttttttttttttttttttttttttttt  iiiiiiiiiiiii  ooooooo  ---------
++ * [=====================vblk=======================]  [ block boundary ]
++ */
++#define VLBA_RESOLVE(vlba)                                                     \
++	u64 vblk = (vlba) / CLUSTER_LBAS;                                      \
++	u64 off = (vlba) % CLUSTER_LBAS;                                       \
++	u64 tag = vblk / XCACHE_LINES;                                         \
++	u32 idx = vblk % XCACHE_LINES;
++
++char _license[] SEC("license") = "GPL";
++
++struct {
++	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
++	__type(key, u32);
++	__type(value, u64);
++	__uint(max_entries, XCACHE_SIZE);
++} cache_tag SEC(".maps");
++
++struct {
++	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
++	__type(key, u32);
++	__type(value, u64);
++	__uint(max_entries, XCACHE_SIZE);
++} cache_plba SEC(".maps");
++
++struct {
++	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
++	__type(key, u32);
++	__type(value, u32);
++	__uint(max_entries, XCACHE_LINES);
++} cache_meta SEC(".maps");
++
++// https://en.wikipedia.org/wiki/Pseudo-LRU#Bit-PLRU
++// https://github.com/karlmcguire/plru
++
++// length0 is 0-based (NVMe-style)
++static u64 lba_lookup(u64 vlba, u16 length0, u32 *aux)
++{
++	VLBA_RESOLVE(vlba);
++	int i;
++	*aux = 0;
++	if (vblk != (vlba + length0) / CLUSTER_LBAS)
++		return U64_MAX;
++	u32 *meta = bpf_map_lookup_elem(&cache_meta, &idx);
++	if (!meta)
++		return U64_MAX;
++	for (i = 0; i < XCACHE_ASSOC; i++) {
++		if (AUX_IS_VALID(*meta, i)) {
++			u32 ci = idx * XCACHE_ASSOC + i;
++			u64 *ctag = bpf_map_lookup_elem(&cache_tag, &ci);
++			if (ctag && *ctag == tag) {
++				*meta |= META_MRU << i;
++				if ((*meta & META_MRU_MASK) == META_MRU_MASK)
++					*meta = (*meta & ~META_MRU_MASK) |
++						(META_MRU << i);
++				u64 *plba =
++					bpf_map_lookup_elem(&cache_plba, &ci);
++				if (!plba)
++					return U64_MAX;
++				bpf_map_update_elem(&cache_meta, &idx, meta,
++						    BPF_ANY);
++				*aux = AUX_GET(*meta, i);
++				return *plba + off;
++			}
++		}
++	}
++	return U64_MAX;
++}
++
++static u64 lba_update(u64 vlba, u64 plba, u32 aux)
++{
++	VLBA_RESOLVE(vlba);
++	int i;
++	u32 *meta = bpf_map_lookup_elem(&cache_meta, &idx);
++	u32 ci;
++	if (!meta)
++		return U64_MAX;
++	for (i = 0; i < XCACHE_ASSOC; i++) {
++		if (AUX_IS_VALID(*meta, i)) {
++			u64 *ctag;
++			ci = idx * XCACHE_ASSOC + i;
++			ctag = bpf_map_lookup_elem(&cache_tag, &ci);
++			if (ctag && *ctag == tag)
++				break;
++		}
++	}
++	if (i == XCACHE_ASSOC)
++		for (i = 0; i < XCACHE_ASSOC; i++)
++			if (!AUX_IS_VALID(*meta, i))
++				break;
++	if (i == XCACHE_ASSOC)
++		for (i = 0; i < XCACHE_ASSOC; i++)
++			if (!(*meta & (META_MRU << i)))
++				break;
++	if (i == XCACHE_ASSOC)
++		i = 0;
++	*meta = (*meta & ~(AUX_MASK << ((i * AUX_SHIFT)))) |
++		(aux << (i * AUX_SHIFT)) | (META_MRU << i);
++	if ((*meta & META_MRU_MASK) == META_MRU_MASK)
++		*meta = (*meta & ~META_MRU_MASK) | (META_MRU << i);
++	ci = idx * XCACHE_ASSOC + i;
++	bpf_map_update_elem(&cache_tag, &ci, &tag, BPF_ANY);
++	bpf_map_update_elem(&cache_plba, &ci, &plba, BPF_ANY);
++	bpf_map_update_elem(&cache_meta, &idx, meta, BPF_ANY);
++	return plba + off;
++}
++
++static void lba_flush_range(u64 vlba, u16 length0)
++{
++	VLBA_RESOLVE(vlba);
++	if (vblk != (vlba + length0) / CLUSTER_LBAS)
++		return;
++	s32 rest = (s32)length0 + 1;
++	while (rest > 0) {
++		u32 *meta = bpf_map_lookup_elem(&cache_meta, &idx);
++		int i;
++		if (meta) {
++			for (i = 0; i < XCACHE_ASSOC; i++) {
++				u64 *ctag;
++				u32 ci = idx * XCACHE_ASSOC + i;
++				ctag = bpf_map_lookup_elem(&cache_tag, &ci);
++				if (ctag && AUX_IS_VALID(*meta, i) &&
++				    *ctag == tag)
++					*meta &= ~(AUXBITS_VALID
++						   << (i * AUX_SHIFT));
++			}
++			bpf_map_update_elem(&cache_meta, &idx, meta, BPF_ANY);
++		}
++		idx = (idx + 1) % XCACHE_LINES;
++		rest -= CLUSTER_LBAS;
++	}
++}
++
++static long lba_clear_flag_all(u32 aux)
++{
++	u32 meta_mask = 0;
++	int i;
++	for (i = 0; i < AUX_MAX_ASSOC; i++)
++		meta_mask |= aux << (i * AUX_SHIFT);
++	meta_mask = ~meta_mask;
++	return bpf_arraymap_elem_band(&cache_meta, &meta_mask);
++}
++
++static int nm_do_rw(struct bpf_io_ctx *ctx)
++{
++	u64 val;
++	u32 aux;
++	u64 slba = ctx->cmd.rw.slba;
++	u16 length0 = ctx->cmd.rw.length;
++
++	val = lba_lookup(slba, length0, &aux);
++	if (val != U64_MAX && ((ctx->cmd.common.opcode == nvme_cmd_read) ||
++			       (aux & AUXBITS_WRITABLE))) {
++		// direct translation succeeded
++		ctx->cmd.rw.slba = val;
++		return NMBPF_SEND_HQ | NMBPF_WILL_COMPLETE_HQ;
++	} else {
++		if (ctx->cmd.common.opcode != nvme_cmd_read)
++			lba_flush_range(slba, length0);
++		return NMBPF_SEND_FD | NMBPF_HOOK_NFD_WRITE |
++		       NMBPF_WAIT_FOR_HOOK;
++	}
++}
++
++static int nm_on_rw_respond(struct bpf_io_ctx *ctx)
++{
++	u64 val;
++
++	// aux = [ctrl, paddr_lo, paddr_hi]
++	// ctrl = cmd (AUX_CMD_MASK) | auxbits
++	if (ctx->aux[0] & AUXBITS_VALID) {
++		u64 plba;
++		val = (u64)ctx->aux[1] | ((u64)ctx->aux[2] << 32);
++		plba = lba_update(ctx->cmd.rw.slba,
++				  /* truncate the block offset */
++				  val / CLUSTER_SIZE * CLUSTER_LBAS,
++				  ctx->aux[0] & AUX_MASK);
++		if (plba == U64_MAX) {
++			// this really shouldn't happen but...
++			return NVME_SC_DNR | NVME_SC_INTERNAL;
++		} else if (ctx->aux[0] & AUXCMD_FORWARD) {
++			ctx->cmd.rw.slba = plba;
++			return NMBPF_SEND_HQ | NMBPF_WILL_COMPLETE_HQ;
++		} else {
++			return ctx->data;
++		}
++	} else {
++		if (!(ctx->aux[0] & AUXCMD_KEEP))
++			lba_flush_range(ctx->cmd.rw.slba, ctx->cmd.rw.length);
++		return ctx->data;
++	}
++}
++
++SEC("nvme_mdev")
++int nvme_run_bpf(struct bpf_io_ctx *ctx)
++{
++	if (ctx->cmd.common.flags & NVME_CMD_SGL_ALL)
++		return NVME_SC_DNR | NVME_SC_INVALID_OPCODE;
++
++	switch (ctx->cmd.common.opcode) {
++	case nvme_cmd_read:
++	case nvme_cmd_write:
++	case nvme_cmd_write_zeroes:
++		switch (ctx->current_hook) {
++		case NMBPF_HOOK_VSQ:
++			return nm_do_rw(ctx);
++		case NMBPF_HOOK_NFD_WRITE:
++			return nm_on_rw_respond(ctx);
++		default:
++			return NMBPF_SEND_HQ | NMBPF_WILL_COMPLETE_HQ;
++		}
++	case 0x81: { // snapshot
++		long ret = lba_clear_flag_all(AUXBITS_WRITABLE);
++		if (ret < 0)
++			return NVME_SC_DNR | NVME_SC_INTERNAL;
++		if (ret != XCACHE_LINES)
++			return NVME_SC_INTERNAL;
++		return NMBPF_SEND_FD | NMBPF_WILL_COMPLETE_FD;
++	}
++	default:
++		return NMBPF_SEND_HQ | NMBPF_WILL_COMPLETE_HQ;
++	}
++}
+diff --git a/samples/bpf/nmbpf_xcownc.c b/samples/bpf/nmbpf_xcownc.c
+new file mode 100644
+index 000000000000..0995aaa4cba2
+--- /dev/null
++++ b/samples/bpf/nmbpf_xcownc.c
+@@ -0,0 +1,63 @@
++#include <linux/bpf.h>
++#include <linux/nvme.h>
++#include <linux/bpf_nvme_mdev.h>
++#include <bpf/bpf_helpers.h>
++
++#define CLUSTER_SIZE 65536
++#define LBA_SIZE 512
++#define CLUSTER_LBAS (CLUSTER_SIZE / LBA_SIZE)
++
++enum AuxBits {
++	AUXBITS_VALID = 0x1,
++	AUXBITS_WRITABLE = 0x2,
++};
++enum AuxCommand {
++	AUXCMD_KEEP = 0x40000000,
++	AUXCMD_FORWARD = 0x20000000,
++};
++
++char _license[] SEC("license") = "GPL";
++
++static int nm_on_rw_respond(struct bpf_io_ctx *ctx)
++{
++	u64 vblk = ctx->cmd.rw.slba / CLUSTER_LBAS;
++	u64 off = ctx->cmd.rw.slba % CLUSTER_LBAS;
++	if (ctx->aux[0] & AUXBITS_VALID) {
++		u64 val = (u64)ctx->aux[1] | ((u64)ctx->aux[2] << 32);
++		u64 plba = val / CLUSTER_SIZE * CLUSTER_LBAS + off;
++		if (ctx->aux[0] & AUXCMD_FORWARD) {
++			ctx->cmd.rw.slba = plba;
++			return NMBPF_SEND_HQ | NMBPF_WILL_COMPLETE_HQ;
++		} else {
++			return ctx->data;
++		}
++	} else {
++		return ctx->data;
++	}
++}
++
++SEC("nvme_mdev")
++int nvme_run_bpf(struct bpf_io_ctx *ctx)
++{
++	if (ctx->cmd.common.flags & NVME_CMD_SGL_ALL)
++		return NVME_SC_DNR | NVME_SC_INVALID_OPCODE;
++
++	switch (ctx->cmd.common.opcode) {
++	case nvme_cmd_read:
++	case nvme_cmd_write:
++	case nvme_cmd_write_zeroes:
++		switch (ctx->current_hook) {
++		case NMBPF_HOOK_VSQ:
++			return NMBPF_SEND_FD | NMBPF_HOOK_NFD_WRITE |
++			       NMBPF_WAIT_FOR_HOOK;
++		case NMBPF_HOOK_NFD_WRITE:
++			return nm_on_rw_respond(ctx);
++		default:
++			return NMBPF_SEND_HQ | NMBPF_WILL_COMPLETE_HQ;
++		}
++	case 0x81: // snapshot
++		return NMBPF_SEND_FD | NMBPF_WILL_COMPLETE_FD;
++	default:
++		return NMBPF_SEND_HQ | NMBPF_WILL_COMPLETE_HQ;
++	}
++}
+diff --git a/tools/include/uapi/linux/bpf.h b/tools/include/uapi/linux/bpf.h
+index 1037f7d8d736..8ea54114a76e 100644
+--- a/tools/include/uapi/linux/bpf.h
++++ b/tools/include/uapi/linux/bpf.h
+@@ -3743,6 +3743,12 @@ union bpf_attr {
+  * 	Return
+  * 		The helper returns **TC_ACT_REDIRECT** on success or
+  * 		**TC_ACT_SHOT** on error.
++ *
++ * long bpf_arraymap_elem_band(struct bpf_map *map, const void *value)
++ * 	Description
++ * 		Calculate binary AND of all map elements with the given value.
++ * 	Return
++ * 		0 on success, or a negative error in case of failure.
+  */
+ #define __BPF_FUNC_MAPPER(FN)		\
+ 	FN(unspec),			\
+@@ -3901,6 +3907,7 @@ union bpf_attr {
+ 	FN(per_cpu_ptr),		\
+ 	FN(this_cpu_ptr),		\
+ 	FN(redirect_peer),		\
++	FN(arraymap_elem_band),		\
+ 	/* */
+ 
+ /* integer value in 'imm' field of BPF_CALL instruction selects which helper
+-- 
+2.34.1
+

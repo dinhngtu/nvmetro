@@ -1,0 +1,90 @@
+{
+  "fabric_modules": [],
+  "storage_objects": [
+    {
+      "alua_tpgs": [
+        {
+          "alua_access_state": 0,
+          "alua_access_status": 0,
+          "alua_access_type": 3,
+          "alua_support_active_nonoptimized": 1,
+          "alua_support_active_optimized": 1,
+          "alua_support_offline": 1,
+          "alua_support_standby": 1,
+          "alua_support_transitioning": 1,
+          "alua_support_unavailable": 1,
+          "alua_write_metadata": 0,
+          "implicit_trans_secs": 0,
+          "name": "default_tg_pt_gp",
+          "nonop_delay_msecs": 100,
+          "preferred": 0,
+          "tg_pt_gp_id": 0,
+          "trans_delay_msecs": 0
+        }
+      ],
+      "attributes": {
+        "alua_support": 1,
+        "block_size": 512,
+        "emulate_3pc": 1,
+        "emulate_caw": 1,
+        "emulate_dpo": 1,
+        "emulate_fua_read": 1,
+        "emulate_fua_write": 1,
+        "emulate_model_alias": 1,
+        "emulate_pr": 1,
+        "emulate_rest_reord": 0,
+        "emulate_tas": 1,
+        "emulate_tpu": 0,
+        "emulate_tpws": 0,
+        "emulate_ua_intlck_ctrl": 0,
+        "emulate_write_cache": 0,
+        "enforce_pr_isids": 1,
+        "force_pr_aptpl": 0,
+        "is_nonrot": 1,
+        "max_unmap_block_desc_count": 1,
+        "max_unmap_lba_count": 33554432,
+        "max_write_same_len": 65535,
+        "optimal_sectors": 4096,
+        "pgr_support": 1,
+        "pi_prot_format": 0,
+        "pi_prot_type": 0,
+        "pi_prot_verify": 0,
+        "queue_depth": 128,
+        "unmap_granularity": 128,
+        "unmap_granularity_alignment": 0,
+        "unmap_zeroes_data": 0
+      },
+      "dev": "/dev/lcow/ltop",
+      "name": "lcowtop",
+      "plugin": "block",
+      "readonly": false,
+      "write_back": false,
+      "wwn": "663aaee6-0826-40ea-95a0-018a0628a995"
+    }
+  ],
+  "targets": [
+    {
+      "fabric": "vhost",
+      "tpgs": [
+        {
+          "attributes": {
+            "fabric_prot_type": 0
+          },
+          "enable": true,
+          "luns": [
+            {
+              "alias": "d07a928bd1",
+              "alua_tg_pt_gp_name": "default_tg_pt_gp",
+              "index": 0,
+              "storage_object": "/backstores/block/lcowtop"
+            }
+          ],
+          "node_acls": [],
+          "portals": [],
+          "tag": 1
+        }
+      ],
+      "wwn": "naa.5001405c77f05226"
+    }
+  ]
+}

@@ -4,7 +4,11 @@ set -eu
 . ./vars.sh
 
 make_memfile
-make_encspdk
+modprobe cuse
+make_spdk
+$spdk/scripts/rpc.py accel_crypto_key_create -c AES_XTS -k e9b699a03901741303b1bf3416c3c01e -e 7b3dcb3e5a9aeb219f498ab6c7ebdb6f -n encnvmekey
+$spdk/scripts/rpc.py bdev_crypto_create -n encnvmekey nvme0n1 encnvme
+$spdk/scripts/rpc.py vhost_create_blk_controller --cpumask $spdkcpus vhost.0 encnvme
 
 trap "cleanup_spdk" EXIT
 sleep 1

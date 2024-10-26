@@ -5,6 +5,7 @@ set -eu
 
 make_memfile
 make_spdk
+$spdk/scripts/rpc.py vhost_create_blk_controller --cpumask $spdkcpus vhost.0 nvme0n1
 
 trap "cleanup_spdk" EXIT
 sleep 1

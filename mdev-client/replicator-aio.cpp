@@ -88,7 +88,7 @@ static void worker_func(
 
         auto wnd = controller.get_pending_completions(std::span(cqebuf));
         for (auto cqe : wnd.cqes) {
-            auto t = controller.cqe_get_data(cqe);
+            auto t = static_cast<sq_ticket *>(controller.cqe_get_data(cqe));
             auto [qi, ucid] = unmake_tag(t->tag);
             delete t;
 

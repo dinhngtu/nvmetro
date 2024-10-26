@@ -9,6 +9,6 @@ sleep 1
 mkdir -p /run/qemu
 
 # don't use hcpus, let qemu run on all cpus
-numactl -m 0 -- qemu-system-x86_64 $vms $nets \
+numactl -m 0 -- $qemu_bin $vms $nets \
     -drive id=nvmeblk,file=$nvmeblk,format=raw,discard=on,if=none,cache=none,aio=io_uring \
     -device virtio-blk-pci,drive=nvmeblk,bootindex=2

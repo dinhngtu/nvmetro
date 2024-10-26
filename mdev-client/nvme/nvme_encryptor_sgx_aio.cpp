@@ -19,8 +19,7 @@
 #include "util/uring.hpp"
 #include "vm.hpp"
 
-__u16 nvme_encryptor_sgx_aio::receive_read(size_t sq, const nvme_command &cmd) {
-    (void)sq;
+__u16 nvme_encryptor_sgx_aio::receive_read([[maybe_unused]] size_t sq, const nvme_command &cmd) {
     nvme_cmd_lba_iter lit(*this, cmd);
     auto ret = _e.crypt_command_inplace(&cmd, 1);
     if (ret != static_cast<long>(lit.cmd_nbytes())) {
@@ -31,49 +30,46 @@ __u16 nvme_encryptor_sgx_aio::receive_read(size_t sq, const nvme_command &cmd) {
     return NVME_SC_SUCCESS;
 }
 
-void nvme_encryptor_sgx_aio::submit_write_async(size_t sq, const nvme_command &cmd, uint32_t tag) {
-    (void)sq;
+void nvme_encryptor_sgx_aio::submit_write_async([[maybe_unused]] size_t sq, const nvme_command &cmd, uint32_t tag) {
     nvme_cmd_lba_iter lit(*this, cmd);
 
-    auto ticket = new iovec_ticket();
-    ticket->tag = tag;
-    auto buf = allocator.allocate(lit.cmd_nbytes());
-
-    auto bufspan = std::span(buf, lit.cmd_nbytes());
+    auto ticket = new mem_ticket<sq_ticket>(tag, lit.cmd_nbytes());
+    std::span bufspan(ticket->mem.get(), lit.cmd_nbytes());
     _e.crypt_command(&cmd, bufspan.data(), bufspan.size(), 0);
-    ticket->iovecs.push_back(iovec{.iov_base = buf, .iov_len = lit.cmd_nbytes()});
 
-    _ring.queue_writev(ticket, true, 0, lit.cmd_slba() << lit.cmd_lba_shift());
+    _ring.queue_write(ticket, ticket->mem.get(), lit.cmd_nbytes(), -1, true, 0, lit.cmd_slba() << lit.cmd_lba_shift());
 }
 
-void nvme_encryptor_sgx_aio::submit_write_zeroes_async(size_t sq, const nvme_command &cmd, uint32_t tag) {
-    (void)sq;
+void nvme_encryptor_sgx_aio::submit_write_zeroes_async(
+    [[maybe_unused]] size_t sq,
+    const nvme_command &cmd,
+    uint32_t tag) {
     auto slba = cmd.rw.slba;
     size_t nblocks = static_cast<size_t>(cmd.rw.length) + 1;
     int lbas = ns_lba_shift(cmd.rw.nsid);
     size_t nbytes = nblocks << lbas;
 
-    auto ticket = new iovec_ticket();
-    ticket->tag = tag;
-    auto buf = allocator.allocate(nbytes);
-
-    auto bufspan = std::span(buf, nbytes);
+    auto ticket = new mem_ticket<sq_ticket>(tag, nbytes);
+    std::span bufspan(ticket->mem.get(), nbytes);
     std::fill(bufspan.begin(), bufspan.end(), '\0');
     _e.crypt_buffer_inplace(slba, bufspan.data(), nblocks, 0);
 
-    _ring.queue_writev(ticket, true, 0, slba << lbas);
+    _ring.queue_write(ticket, ticket->mem.get(), nbytes, -1, true, 0, slba << lbas);
 }
 
-void nvme_encryptor_sgx_aio::submit_flush_async(size_t sq, const nvme_command &cmd, uint32_t tag) {
-    (void)sq;
-    (void)cmd;
-    auto ticket = new sq_ticket();
-    ticket->tag = tag;
+void nvme_encryptor_sgx_aio::submit_flush_async(
+    [[maybe_unused]] size_t sq,
+    [[maybe_unused]] const nvme_command &cmd,
+    uint32_t tag) {
+    auto ticket = new sq_ticket(tag);
     _ring.queue_fsync(ticket, true, 0, IORING_FSYNC_DATASYNC);
 }
 
-bool nvme_encryptor_sgx_aio::submit_async(size_t sq, const nvme_command &cmd, uint32_t tag, __u16 &outstatus) {
-    (void)sq;
+bool nvme_encryptor_sgx_aio::submit_async(
+    [[maybe_unused]] size_t sq,
+    const nvme_command &cmd,
+    uint32_t tag,
+    __u16 &outstatus) {
     if (cmd.common.opcode == nvme_cmd_read) {
         outstatus = receive_read(sq, cmd);
         return false;

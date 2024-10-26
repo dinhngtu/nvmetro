@@ -7,7 +7,7 @@ param (
     [Parameter()][string]$TargetUser = "root",
     [Parameter(Mandatory)][string]$TargetDevice,
     [Parameter()][int]$BreakTime = 30,
-    [Parameter()][string]$OutputPath = "/root/nmbpf",
+    [Parameter()][string]$OutputPath = "/home/tu/nmbpf",
     [Parameter()][switch]$NoFormat,
     [Parameter()][int]$NumJobs = 1,
     [Parameter()][switch]$HighPriority

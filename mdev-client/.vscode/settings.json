@@ -81,7 +81,31 @@
         "concepts": "cpp",
         "ranges": "cpp",
         "stop_token": "cpp",
-        "semaphore": "cpp"
+        "semaphore": "cpp",
+        "__tree": "cpp",
+        "complex": "cpp",
+        "future": "cpp",
+        "list": "cpp",
+        "map": "cpp",
+        "regex": "cpp",
+        "set": "cpp",
+        "shared_mutex": "cpp",
+        "__sgx_mutex_base": "cpp",
+        "sgx_condition_variable": "cpp",
+        "sgx_mutex": "cpp",
+        "unordered_set": "cpp",
+        "variant": "cpp",
+        "typeindex": "cpp",
+        "csignal": "cpp",
+        "*.ipp": "cpp",
+        "cfenv": "cpp",
+        "strstream": "cpp",
+        "valarray": "cpp",
+        "any": "cpp",
+        "charconv": "cpp",
+        "coroutine": "cpp",
+        "source_location": "cpp",
+        "rope": "cpp"
     },
     "clang-tidy.executable": "clang-tidy-12",
     "clang-tidy.compilerArgs": [
@@ -94,9 +118,17 @@
         "-stdlib=libc++"
     ],
     "clangd.path": "clangd-12",
-    "C_Cpp.intelliSenseEngine": "Disabled",
     "files.exclude": {
         "*.json": true,
         "**/*.o.json": true
-    }
+    },
+    "search.exclude": {
+        "catch_amalgamated.cpp": true,
+        "include/catch_amalgamated.hpp": true,
+        "include/cxxopts.hpp": true
+    },
+    "[python]": {
+        "editor.defaultFormatter": "ms-python.black-formatter"
+    },
+    "python.formatting.provider": "none"
 }

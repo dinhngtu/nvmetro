@@ -41,6 +41,7 @@ private:
 
 class nvme {
     friend class nvme_cmd_lba_iter;
+    friend class nvme_cmd_page_iter;
 
 public:
     explicit nvme(const std::shared_ptr<mapping> &vm, int nfd) : _vm(vm), _nfd(nfd) {
@@ -65,7 +66,8 @@ protected:
             throw nvme_exception(NVME_SC_DNR | NVME_SC_INVALID_NS);
         }
         if (!_idns[nsid]) {
-            do_id_vns(nsid);
+            if (do_id_vns(nsid) < 0)
+                throw nvme_exception(NVME_SC_DNR | NVME_SC_INVALID_NS);
         }
         return _idns[nsid];
     }
@@ -169,4 +171,62 @@ private:
     size_t _nbytes;
     prp_chain_iter _prp_iter;
     size_t _cli = 0, _pli = 0;
+};
+
+class nvme_cmd_page_iter {
+public:
+    using iterator_category = std::forward_iterator_tag;
+    using value_type = std::span<unsigned char>;
+    using difference_type = void;
+    using pointer = void;
+    using reference = void;
+
+    explicit nvme_cmd_page_iter(nvme &ctrl, const nvme_command &cmd) : _vm(ctrl.vm()), _slba(cmd.rw.slba) {
+        size_t nblocks = static_cast<size_t>(cmd.rw.length) + 1;
+        prp_list cmd_prpl{reinterpret_cast<prp_list::const_pointer>(&cmd.rw.dptr.prp1), 2};
+        _lba_shift = ctrl.ns_lba_shift(cmd.rw.nsid);
+        _nbytes = ctrl.ns_cmd_check_nbytes(nblocks, _lba_shift);
+        _prp_iter = prp_chain_iter(_vm, cmd_prpl, 0, _nbytes);
+    }
+    nvme_cmd_page_iter &operator++() {
+        _prp_iter++;
+        return *this;
+    }
+    inline nvme_cmd_page_iter operator++(int) {
+        nvme_cmd_page_iter tmp(*this);
+        ++*this;
+        return tmp;
+    }
+    inline value_type operator*() const {
+        return _vm->get_span(*_prp_iter, _prp_iter.this_nbytes());
+    }
+
+    inline int cmd_lba_shift() const {
+        return _lba_shift;
+    }
+    inline size_t cmd_lba_size() const {
+        return size_t{1} << _lba_shift;
+    }
+    inline uint64_t cmd_slba() const {
+        return _slba;
+    }
+    inline size_t cmd_nbytes() const {
+        return _nbytes;
+    }
+
+    inline size_t lba() const {
+        return _slba + _cli;
+    }
+
+    inline bool at_end() const {
+        return _prp_iter.at_end();
+    }
+
+private:
+    std::shared_ptr<mapping> _vm;
+    int _lba_shift;
+    uint64_t _slba;
+    size_t _nbytes;
+    prp_chain_iter _prp_iter;
+    size_t _cli = 0;
 };

@@ -19,3 +19,4 @@ AllowAllArgumentsOnNextLine: false
 AllowAllParametersOfDeclarationOnNextLine: false
 AlwaysBreakTemplateDeclarations: Yes
 AccessModifierOffset: -4
+AlignEscapedNewlines: Left

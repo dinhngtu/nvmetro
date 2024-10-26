@@ -1,0 +1,4 @@
+--not-match-f=catch_amalgamated.cpp
+--not-match-f=catch_amalgamated.hpp
+--not-match-f=cxxopts.hpp
+--not-match-f=nvme.h

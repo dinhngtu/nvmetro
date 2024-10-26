@@ -29,6 +29,6 @@ private:
     __u16 receive_write_zeroes(size_t sq, const nvme_command &cmd);
     int _bfd;
     std::unique_ptr<tweakable_block_cipher> _engine;
-    std::vector<unsigned char, aligned_allocator<unsigned char, NVME_PAGE_SIZE>> _zerobuf;
-    std::vector<unsigned char, aligned_allocator<unsigned char, NVME_PAGE_SIZE>> _encbuf;
+    std::vector<unsigned char, aligned_allocator<unsigned char, 64>> _zerobuf;
+    std::vector<unsigned char, aligned_allocator<unsigned char, 64>> _encbuf;
 };

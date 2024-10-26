@@ -14,8 +14,7 @@
 
 constexpr size_t wz_nblocks = 512;
 
-__u16 nvme_encryptor_sgx::receive_read(size_t sq, const nvme_command &cmd) {
-    (void)sq;
+__u16 nvme_encryptor_sgx::receive_read([[maybe_unused]] size_t sq, const nvme_command &cmd) {
     nvme_cmd_lba_iter lit(*this, cmd);
     auto ret = _e.crypt_command_inplace(&cmd, 1);
     if (ret != static_cast<long>(lit.cmd_nbytes())) {
@@ -26,8 +25,7 @@ __u16 nvme_encryptor_sgx::receive_read(size_t sq, const nvme_command &cmd) {
     return NVME_SC_SUCCESS;
 }
 
-__u16 nvme_encryptor_sgx::receive_write_copyback(size_t sq, const nvme_command &cmd) {
-    (void)sq;
+__u16 nvme_encryptor_sgx::receive_write_copyback([[maybe_unused]] size_t sq, const nvme_command &cmd) {
     nvme_cmd_lba_iter lit(*this, cmd);
     if (_encbuf.size() < lit.cmd_nbytes()) {
         _encbuf.resize(lit.cmd_nbytes());
@@ -56,8 +54,7 @@ __u16 nvme_encryptor_sgx::receive_write_copyback(size_t sq, const nvme_command &
     return NVME_SC_SUCCESS;
 }
 
-__u16 nvme_encryptor_sgx::receive_write_zeroes(size_t sq, const nvme_command &cmd) {
-    (void)sq;
+__u16 nvme_encryptor_sgx::receive_write_zeroes([[maybe_unused]] size_t sq, const nvme_command &cmd) {
     auto slba = cmd.rw.slba;
     size_t nblocks = static_cast<size_t>(cmd.rw.length) + 1;
     int lbas = ns_lba_shift(cmd.rw.nsid);
@@ -98,8 +95,7 @@ __u16 nvme_encryptor_sgx::receive_write_zeroes(size_t sq, const nvme_command &cm
     return NVME_SC_SUCCESS;
 }
 
-__u16 nvme_encryptor_sgx::receive(size_t sq, const nvme_command &cmd) {
-    (void)sq;
+__u16 nvme_encryptor_sgx::receive([[maybe_unused]] size_t sq, const nvme_command &cmd) {
     try {
         if (cmd.common.opcode == nvme_cmd_read) {
             DBG_PRINTF(

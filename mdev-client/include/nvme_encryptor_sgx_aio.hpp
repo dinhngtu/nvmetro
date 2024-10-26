@@ -4,7 +4,6 @@
 #include <utility>
 #include <sys/uio.h>
 
-#include "aligned_allocator.hpp"
 #include "nvme.hpp"
 #include "sgx/prp_en.hpp"
 #include "util/uring.hpp"
@@ -57,5 +56,4 @@ private:
     std::shared_ptr<mapping> _vm;
     prp_en _e;
     uring _ring;
-    aligned_allocator<unsigned char, NVME_PAGE_SIZE> allocator{};
 };

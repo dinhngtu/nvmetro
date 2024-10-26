@@ -19,7 +19,6 @@
 #include "cxxopts.hpp"
 #include "util.hpp"
 #include "cmdbuf.hpp"
-#include "aligned_allocator.hpp"
 #include "nvme_encryptor_multi.hpp"
 #include "crypto/aes_xts_libcrypto.hpp"
 #include "crypto/aes_xts_ipp.hpp"
@@ -83,7 +82,6 @@ static void worker_func(
     std::array<nvme_command, NOTIFYFD_BURST> cmds{};
     std::span<nvme_command> cmdspan(cmds);
     std::array<io_uring_cqe *, COMPLETION_BURST> cqebuf{};
-    aligned_allocator<unsigned char, NVME_PAGE_SIZE> allocator{};
 
     for (auto &ctx : contexts) {
         nsqbuf.emplace_back(ctx.sqfd, NMNTFY_SQ_DATA_OFFSET);
@@ -132,14 +130,8 @@ static void worker_func(
         for (auto &controller : controllers) {
             auto wnd = controller.get_pending_completions(std::span(cqebuf));
             for (auto cqe : wnd.cqes) {
-                auto t = controller.cqe_get_data(cqe);
+                auto t = static_cast<sq_ticket *>(controller.cqe_get_data(cqe));
                 auto [qi, ucid] = unmake_tag(t->tag);
-                if (t->category == sq_ticket_category::iovec) {
-                    auto it = static_cast<iovec_ticket *>(t); // NOLINT
-                    for (auto &v : it->iovecs) {
-                        allocator.deallocate(static_cast<unsigned char *>(v.iov_base), v.iov_len);
-                    }
-                }
                 delete t;
 
                 auto status = cqe->res < 0 ? (NVME_SC_DNR | NVME_SC_INTERNAL) : NVME_SC_SUCCESS;

@@ -11,7 +11,15 @@ libmdevclient.a
 compile_commands.json
 *.o.json
 /*.json
+core
 encryptor-sgx
 encryptor-aio
 encryptor-sgx-aio
 encryptor-multi
+test-alloc
+test-xcow
+xcowsrv
+xcowdump
+xcowctl
+writerand
+test-lbacache
