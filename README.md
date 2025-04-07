@@ -1,7 +1,5 @@
-Flexible NVMe Request Routing for Virtual Machines
-==================================================
-
-Tu Dinh Ngoc, Boris Teabe, Georges Da Costa, Daniel Hagimont (IRIT, Université de Toulouse, CNRS, Toulouse INP, UT3)
+NVMetro source code
+===================
 
 Repository structure
 --------------------
@@ -15,3 +13,9 @@ Repository structure
 | eval             | Evaluation parser templates and scripts |
 
 For evaluation instructions, please see the [vmscripts README](vmscripts/README.md).
+
+References
+----------
+
+Extended journal paper: Virtual NVMe-based Storage Function Framework with Fast I/O Request State Management https://doi.org/10.1109/TC.2025.3558033
+Original conference paper: Flexible NVMe Request Routing for Virtual Machines https://doi.org/10.1109/IPDPS57955.2024.00077
